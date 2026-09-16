@@ -981,5 +981,71 @@ describe('antigravity provider helpers', () => {
       expect(calls[1]!.bashCommands).toEqual([])
     })
   })
+
+  it('decodes multiple split field 2 packed varint chunks on a single turn', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-split-chunks-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+
+      const withSplitStepIndices = (fixtureHex: string, chunk1: number[], chunk2: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed1 = Buffer.from(chunk1.flatMap(n => varint(n)))
+        const f2Chunk1 = Buffer.from([...tag(2, 2), ...varint(packed1.length), ...packed1])
+        const packed2 = Buffer.from(chunk2.flatMap(n => varint(n)))
+        const f2Chunk2 = Buffer.from([...tag(2, 2), ...varint(packed2.length), ...packed2])
+        return Buffer.concat([f2Chunk1, f2Chunk2, rest])
+      }
+
+      const encodeToolStepMetadata = (toolName: string, argsJson: string): Buffer => {
+        const toolCallSub = [
+          ...strField(1, 'call_test_split'),
+          ...strField(2, toolName),
+          ...strField(3, argsJson),
+        ]
+        return Buffer.from(lenField(4, toolCallSub))
+      }
+
+      const { DatabaseSync: Database } = requireForTest('node:sqlite')
+      const db = new Database(dbPath) as TestDb
+      try {
+        // Update Turn 0 to carry two distinct field 2 packed chunks: [1] and [2]
+        db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+          withSplitStepIndices(fixture.rows[0]!.hex, [1], [2]),
+        )
+
+        db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, metadata blob)')
+        const stmt = db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)')
+        stmt.run(1, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'git status' })))
+        stmt.run(2, encodeToolStepMetadata('view_file', JSON.stringify({ AbsolutePath: '/foo/bar.ts' })))
+      } finally {
+        db.close()
+      }
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls).toHaveLength(1)
+      expect(calls[0]!.tools).toEqual(['run_command', 'view_file'])
+      expect(calls[0]!.bashCommands).toEqual(['git status'])
+    })
+  })
 })
 

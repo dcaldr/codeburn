@@ -167,7 +167,6 @@ type AntigravityGenMetadataRow = {
 
 type AntigravityStepRow = {
   idx: number
-  step_type: number
   metadata: Uint8Array | string | null
 }
 
@@ -810,7 +809,7 @@ function antigravitySqliteCreatedAt(chatFields: readonly ProtoField[]): string {
   return protoTimestampToIso(firstProtoField(parseProtoFields(metadataBytes), 4))
 }
 
-const SKILL_MD_PATTERN = /(?:[\\/]skills[\\/]|(?:^|[\\/]))([^\\/]+)[\\/]SKILL\.md$/i
+const SKILL_MD_PATTERN = /(?:^|[\\/])([^\\/]+)[\\/]SKILL\.md$/i
 
 function extractAntigravityToolFromStep(metadataBytes: Uint8Array, turn: TurnTools): void {
   const fields = parseProtoFields(metadataBytes)
@@ -960,8 +959,12 @@ function buildCallsFromSqliteGenMetadata(
 
   for (const row of rows) {
     const rootFields = parseProtoFields(genMetadataDataBytes(row.data))
-    const f2 = firstProtoField(rootFields, 2)
-    const stepIndices = f2?.bytes ? decodePackedVarints(f2.bytes) : []
+    const stepIndices: number[] = []
+    for (const field of rootFields) {
+      if (field.number === 2 && field.bytes) {
+        stepIndices.push(...decodePackedVarints(field.bytes))
+      }
+    }
 
     // Resolve steps through gen_metadata.stepIndices. Steps not referenced
     // by gen_metadata represent in-flight actions (status=2) or aborted sessions
@@ -996,7 +999,7 @@ async function parseSqliteGenMetadataCalls(filePath: string, cascadeId: string):
 
     const stepMap = new Map<number, AntigravityStepRow>()
     try {
-      const stepRows = db.query<AntigravityStepRow>('SELECT idx, step_type, metadata FROM steps ORDER BY idx')
+      const stepRows = db.query<AntigravityStepRow>('SELECT idx, metadata FROM steps ORDER BY idx')
       for (const step of stepRows) {
         stepMap.set(step.idx, step)
       }
