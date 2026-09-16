@@ -36,7 +36,34 @@ command, uninstall restores that previous command.
 
 ## Storage format
 
-Protobuf and SQLite. For SQLite `.db` conversation files, token usage is extracted from the `gen_metadata` table, and tool execution events (tool calls, bash commands from `run_command`, MCP servers via `mcp__<server>__<tool>`, and skills from `SKILL.md` reads) are parsed from the `steps` table (`step_type = 132`). For older `.pb` files, cascade and response objects map to `ParsedProviderCall` directly via the language-server RPC.
+Protobuf and SQLite.
+
+### SQLite `.db` Files
+Native Antigravity Desktop, IDE, and CLI sessions store structured state in SQLite databases under `~/.gemini/<app>/conversations/<id>.db`:
+
+1. **`gen_metadata` (Model Generations)**:
+   - Each row represents a completed LLM completion turn.
+   - `data` BLOB Protobuf:
+     - **Field 1 (`ChatModel`)**: Token usage (`Field 4`: input, output, cached, thinking), canonical model ID (`Field 9`), display name (`Field 21`), and generation timestamp (`Field 9 -> Field 4`).
+     - **Field 2 (`stepIndices`)**: Packed varints listing the exact `steps.idx` rows produced during that generation turn.
+     - **Field 4**: Generation UUID used for deduplication (`<cascadeId>:<responseId>`).
+2. **`steps` (Execution Steps & Tools)**:
+   - Monotonic step records (`idx`, `step_type`, `status`, `metadata`).
+   - `metadata` BLOB Protobuf:
+     - **Field 4 (`ToolCallMetadata`)**: Contains `call_id` (Field 1), canonical `tool_name` (Field 2), and `argumentsJson` (Field 3).
+     - Standard tool calls are mapped directly:
+       - `run_command`: populates `bashCommands`.
+       - `call_mcp_tool`: extracts `ServerName` and `ToolName` as `mcp__<server>__<tool>`.
+       - `view_file`: scans `AbsolutePath` for `SKILL.md` to identify activated skills.
+       - `invoke_subagent`: parses `Subagents` array for subagent archetype roles.
+       - Assistant-to-assistant replies (`send_message`) are explicitly excluded from developer tools.
+3. **Concurrency & Lifecycle**:
+   - Operates in SQLite WAL mode.
+   - Transient database write locks during progressing sessions propagate `SQLITE_BUSY` to allow automatic retry on the next refresh pass.
+   - In-flight steps (`status = 2`) settle into subsequent generation records once completed.
+   - User-cancelled turns (`status = 7`) commit partial token spend to `gen_metadata`.
+
+For older `.pb` files, cascade and response objects map to `ParsedProviderCall` directly via the language-server RPC.
 
 ## Caching
 

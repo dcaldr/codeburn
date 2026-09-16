@@ -765,18 +765,31 @@ describe('antigravity provider helpers', () => {
         return Buffer.from(lenField(4, toolCallSub))
       }
 
+      const withStepIndices = (fixtureHex: string, indices: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed = Buffer.from(indices.flatMap(n => varint(n)))
+        const field2 = Buffer.from([...tag(2, 2), ...varint(packed.length), ...packed])
+        return Buffer.concat([field2, rest])
+      }
+
       const { DatabaseSync: Database } = requireForTest('node:sqlite')
       const db = new Database(dbPath) as TestDb
       try {
+        db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+          withStepIndices(fixture.rows[0]!.hex, [1, 2, 3, 4, 5, 6, 7]),
+        )
         db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
         const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
         // Turn 0 (starts with step_type 15)
         stmt.run(0, 15, null)
-        stmt.run(1, 132, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'git status' })))
-        stmt.run(2, 132, encodeToolStepMetadata('call_mcp_tool', JSON.stringify({ ServerName: 'dart-mcp-server', ToolName: 'analyze_files' })))
-        stmt.run(3, 132, encodeToolStepMetadata('view_file', JSON.stringify({ AbsolutePath: '/home/user/.agents/skills/graphify/SKILL.md' })))
-        stmt.run(4, 132, encodeToolStepMetadata('invoke_subagent', JSON.stringify({ Subagents: [{ Role: 'Codebase Researcher' }] })))
-        stmt.run(5, 132, encodeToolStepMetadata('find_by_name', JSON.stringify({ Pattern: '*.ts' })))
+        stmt.run(1, 21, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'git status' })))
+        stmt.run(2, 38, encodeToolStepMetadata('call_mcp_tool', JSON.stringify({ ServerName: 'dart-mcp-server', ToolName: 'analyze_files' })))
+        stmt.run(3, 8, encodeToolStepMetadata('view_file', JSON.stringify({ AbsolutePath: '/home/user/.agents/skills/graphify/SKILL.md' })))
+        stmt.run(4, 127, encodeToolStepMetadata('invoke_subagent', JSON.stringify({ Subagents: [{ Role: 'Codebase Researcher' }] })))
+        stmt.run(5, 25, encodeToolStepMetadata('find_by_name', JSON.stringify({ Pattern: '*.ts' })))
+        stmt.run(6, 5, encodeToolStepMetadata('write_to_file', JSON.stringify({ TargetFile: '/path/file.txt' })))
+        // send_message is assistant messaging, should be excluded from tools
+        stmt.run(7, 132, encodeToolStepMetadata('send_message', JSON.stringify({ Message: 'All tasks completed' })))
       } finally {
         db.close()
       }
@@ -791,6 +804,7 @@ describe('antigravity provider helpers', () => {
         'view_file',
         'invoke_subagent',
         'find_by_name',
+        'write_to_file',
       ])
       expect(firstCall.bashCommands).toEqual(['git status'])
       expect(firstCall.skills).toEqual(['graphify'])
@@ -844,6 +858,13 @@ describe('antigravity provider helpers', () => {
       const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
       const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
 
+      const withStepIndices = (fixtureHex: string, indices: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed = Buffer.from(indices.flatMap(n => varint(n)))
+        const field2 = Buffer.from([...tag(2, 2), ...varint(packed.length), ...packed])
+        return Buffer.concat([field2, rest])
+      }
+
       const encodeToolStepMetadata = (toolName: string, argsRaw: string): Buffer => {
         const toolCallSub = [
           ...strField(1, 'call_test_bad'),
@@ -856,11 +877,14 @@ describe('antigravity provider helpers', () => {
       const { DatabaseSync: Database } = requireForTest('node:sqlite')
       const db = new Database(dbPath) as TestDb
       try {
+        db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+          withStepIndices(fixture.rows[0]!.hex, [1, 2]),
+        )
         db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
         const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
         stmt.run(0, 15, null)
-        stmt.run(1, 132, encodeToolStepMetadata('run_command', '{not valid json}'))
-        stmt.run(2, 132, encodeToolStepMetadata('call_mcp_tool', 'broken json'))
+        stmt.run(1, 21, encodeToolStepMetadata('run_command', '{not valid json}'))
+        stmt.run(2, 38, encodeToolStepMetadata('call_mcp_tool', 'broken json'))
       } finally {
         db.close()
       }
@@ -898,6 +922,13 @@ describe('antigravity provider helpers', () => {
       const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
       const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
 
+      const withStepIndices = (fixtureHex: string, indices: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed = Buffer.from(indices.flatMap(n => varint(n)))
+        const field2 = Buffer.from([...tag(2, 2), ...varint(packed.length), ...packed])
+        return Buffer.concat([field2, rest])
+      }
+
       const encodeToolStepMetadata = (toolName: string, argsJson: string): Buffer => {
         const toolCallSub = [
           ...strField(1, 'call_test_turn0'),
@@ -910,8 +941,13 @@ describe('antigravity provider helpers', () => {
       const { DatabaseSync: Database } = requireForTest('node:sqlite')
       const db = new Database(dbPath) as TestDb
       try {
-        // Insert a second gen_metadata row with a distinct responseId
-        const firstRowData = Buffer.from(fixture.rows[0]!.hex, 'hex')
+        // Update Turn 0 to point to steps 1 and 2
+        db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+          withStepIndices(fixture.rows[0]!.hex, [1, 2]),
+        )
+
+        // Insert a second gen_metadata row with a distinct responseId pointing to step 4
+        const firstRowData = withStepIndices(fixture.rows[0]!.hex, [4])
         // Replace fixture-response-1 with fixture-response-2 in binary
         const secondRowData = Buffer.from(firstRowData)
         const resp1Idx = secondRowData.indexOf(Buffer.from('fixture-response-1'))
@@ -922,11 +958,13 @@ describe('antigravity provider helpers', () => {
 
         db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
         const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
-        // Turn 0: step_type 15 + step_type 132 (has tool)
+        // Turn 0: step_type 15 + step_type 21 (run_command) + step_type 8 (view_file)
         stmt.run(0, 15, null)
-        stmt.run(1, 132, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'npm test' })))
-        // Turn 1: step_type 15 only (no tools)
-        stmt.run(2, 15, null)
+        stmt.run(1, 21, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'npm test' })))
+        stmt.run(2, 8, encodeToolStepMetadata('view_file', JSON.stringify({ AbsolutePath: '/foo/bar.ts' })))
+        // Turn 1: step_type 15 + step_type 132 (send_message - excluded)
+        stmt.run(3, 15, null)
+        stmt.run(4, 132, encodeToolStepMetadata('send_message', JSON.stringify({ Message: 'Task finished' })))
       } finally {
         db.close()
       }
@@ -935,10 +973,10 @@ describe('antigravity provider helpers', () => {
       expect(calls).toHaveLength(2)
 
       // Turn 0 has tools and bash command
-      expect(calls[0]!.tools).toEqual(['run_command'])
+      expect(calls[0]!.tools).toEqual(['run_command', 'view_file'])
       expect(calls[0]!.bashCommands).toEqual(['npm test'])
 
-      // Turn 1 has no tools and no bash commands (did not leak from Turn 0)
+      // Turn 1 has no tools (send_message skipped) and no bash commands (did not leak from Turn 0)
       expect(calls[1]!.tools).toEqual([])
       expect(calls[1]!.bashCommands).toEqual([])
     })

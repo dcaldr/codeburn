@@ -814,109 +814,95 @@ const SKILL_MD_PATTERN = /(?:[\\/]skills[\\/]|(?:^|[\\/]))([^\\/]+)[\\/]SKILL\.m
 
 function extractAntigravityToolFromStep(metadataBytes: Uint8Array, turn: TurnTools): void {
   const fields = parseProtoFields(metadataBytes)
-  const toolCallField = firstProtoField(fields, 4)
-  if (!toolCallField?.bytes) return
+  for (const field of fields) {
+    if (field.number !== 4 || !field.bytes) continue
 
-  const toolFields = parseProtoFields(toolCallField.bytes)
-  const toolName = protoFieldText(firstProtoField(toolFields, 2))
-  if (!toolName) return
+    const toolFields = parseProtoFields(field.bytes)
+    const toolName = protoFieldText(firstProtoField(toolFields, 2))
+    if (!toolName || toolName === 'send_message') continue
 
-  const rawArgs = protoFieldText(firstProtoField(toolFields, 3))
-  let args: Record<string, unknown> | null = null
-  if (rawArgs) {
-    try {
-      const parsed = JSON.parse(rawArgs)
-      if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
-    } catch { /* ignore malformed json */ }
-  }
-
-  if (toolName === 'call_mcp_tool') {
-    const server = typeof args?.['ServerName'] === 'string' ? args['ServerName'].trim() : ''
-    const tool = typeof args?.['ToolName'] === 'string' ? args['ToolName'].trim() : ''
-    if (server && tool) {
-      turn.tools.push(`mcp__${server}__${tool}`)
-    } else {
-      turn.tools.push('call_mcp_tool')
+    const rawArgs = protoFieldText(firstProtoField(toolFields, 3))
+    let args: Record<string, unknown> | null = null
+    if (rawArgs) {
+      try {
+        const parsed = JSON.parse(rawArgs)
+        if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
+      } catch { /* ignore malformed json */ }
     }
-    return
-  }
 
-  if (toolName === 'run_command') {
-    turn.tools.push(toolName)
-    const cmd = typeof args?.['CommandLine'] === 'string' ? args['CommandLine'].trim() : ''
-    if (cmd) turn.bashCommands.push(cmd)
-    return
-  }
-
-  if (toolName === 'view_file') {
-    turn.tools.push(toolName)
-    const path = typeof args?.['AbsolutePath'] === 'string'
-      ? args['AbsolutePath']
-      : typeof args?.['file_path'] === 'string' ? args['file_path'] : ''
-    if (path) {
-      const match = path.match(SKILL_MD_PATTERN)
-      if (match?.[1]) {
-        if (!turn.skills) turn.skills = []
-        turn.skills.push(match[1])
+    if (toolName === 'call_mcp_tool') {
+      const server = typeof args?.['ServerName'] === 'string' ? args['ServerName'].trim() : ''
+      const tool = typeof args?.['ToolName'] === 'string' ? args['ToolName'].trim() : ''
+      if (server && tool) {
+        turn.tools.push(`mcp__${server}__${tool}`)
+      } else {
+        turn.tools.push('call_mcp_tool')
       }
+      continue
     }
-    return
-  }
 
-  if (toolName === 'invoke_subagent') {
-    turn.tools.push(toolName)
-    if (Array.isArray(args?.['Subagents'])) {
-      for (const sa of args['Subagents']) {
-        if (sa && typeof sa === 'object') {
-          const typeOrRole = typeof sa['TypeName'] === 'string' && sa['TypeName']
-            ? sa['TypeName']
-            : typeof sa['Role'] === 'string' ? sa['Role'] : ''
-          if (typeOrRole) {
-            if (!turn.subagentTypes) turn.subagentTypes = []
-            turn.subagentTypes.push(typeOrRole)
+    if (toolName === 'run_command') {
+      turn.tools.push(toolName)
+      const cmd = typeof args?.['CommandLine'] === 'string' ? args['CommandLine'].trim() : ''
+      if (cmd) turn.bashCommands.push(cmd)
+      continue
+    }
+
+    if (toolName === 'view_file') {
+      turn.tools.push(toolName)
+      const path = typeof args?.['AbsolutePath'] === 'string'
+        ? args['AbsolutePath']
+        : typeof args?.['file_path'] === 'string' ? args['file_path'] : ''
+      if (path) {
+        const match = path.match(SKILL_MD_PATTERN)
+        if (match?.[1]) {
+          if (!turn.skills) turn.skills = []
+          turn.skills.push(match[1])
+        }
+      }
+      continue
+    }
+
+    if (toolName === 'invoke_subagent') {
+      turn.tools.push(toolName)
+      if (Array.isArray(args?.['Subagents'])) {
+        for (const sa of args['Subagents']) {
+          if (sa && typeof sa === 'object') {
+            const typeOrRole = typeof sa['TypeName'] === 'string' && sa['TypeName']
+              ? sa['TypeName']
+              : typeof sa['Role'] === 'string' ? sa['Role'] : ''
+            if (typeOrRole) {
+              if (!turn.subagentTypes) turn.subagentTypes = []
+              turn.subagentTypes.push(typeOrRole)
+            }
           }
         }
       }
+      continue
     }
-    return
-  }
 
-  turn.tools.push(toolName)
+    turn.tools.push(toolName)
+  }
 }
 
-function parseSqliteSteps(db: ReturnType<typeof openDatabase>): TurnTools[] {
-  try {
-    const tableCheck = db.query<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='steps'",
-    )
-    if (tableCheck.length === 0) return []
-
-    const stepRows = db.query<AntigravityStepRow>(
-      'SELECT idx, step_type, metadata FROM steps WHERE step_type IN (15, 132) ORDER BY idx',
-    )
-    const turns: TurnTools[] = []
-    let currentTurn: TurnTools | null = null
-
-    for (const row of stepRows) {
-      if (row.step_type === 15) {
-        currentTurn = { tools: [], bashCommands: [] }
-        turns.push(currentTurn)
-      } else if (row.step_type === 132 && currentTurn && row.metadata) {
-        extractAntigravityToolFromStep(genMetadataDataBytes(row.metadata), currentTurn)
-      }
-    }
-    return turns
-  } catch {
-    return []
+function decodePackedVarints(data: Uint8Array): number[] {
+  const values: number[] = []
+  let offset = 0
+  while (offset < data.length) {
+    const res = readProtoVarint(data, offset)
+    if (!res) break
+    values.push(Number(res.value))
+    offset = res.offset
   }
+  return values
 }
 
 function buildCallFromSqliteGenMetadataRow(
   cascadeId: string,
   row: AntigravityGenMetadataRow,
+  rootFields: readonly ProtoField[],
   turnTools?: TurnTools,
 ): ParsedProviderCall | null {
-  const rootFields = parseProtoFields(genMetadataDataBytes(row.data))
   const chatFields = parseProtoFields(protoFieldBytes(firstProtoField(rootFields, 1)) ?? new Uint8Array())
   const usageFields = parseProtoFields(protoFieldBytes(firstProtoField(chatFields, 4)) ?? new Uint8Array())
   if (usageFields.length === 0) return null
@@ -967,14 +953,28 @@ function buildCallFromSqliteGenMetadataRow(
 function buildCallsFromSqliteGenMetadata(
   cascadeId: string,
   rows: AntigravityGenMetadataRow[],
-  turnTools: TurnTools[],
+  stepMap: Map<number, AntigravityStepRow>,
 ): ParsedProviderCall[] {
   const calls: ParsedProviderCall[] = []
   const seenResponseIds = new Set<string>()
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!
-    const call = buildCallFromSqliteGenMetadataRow(cascadeId, row, turnTools[i])
+  for (const row of rows) {
+    const rootFields = parseProtoFields(genMetadataDataBytes(row.data))
+    const f2 = firstProtoField(rootFields, 2)
+    const stepIndices = f2?.bytes ? decodePackedVarints(f2.bytes) : []
+
+    // Resolve steps through gen_metadata.stepIndices. Steps not referenced
+    // by gen_metadata represent in-flight actions (status=2) or aborted sessions
+    // (status=9) without finalized token accounting, which are omitted until committed.
+    const turnTools: TurnTools = { tools: [], bashCommands: [] }
+    for (const stepIdx of stepIndices) {
+      const step = stepMap.get(stepIdx)
+      if (step?.metadata) {
+        extractAntigravityToolFromStep(genMetadataDataBytes(step.metadata), turnTools)
+      }
+    }
+
+    const call = buildCallFromSqliteGenMetadataRow(cascadeId, row, rootFields, turnTools)
     if (!call) continue
     if (seenResponseIds.has(call.deduplicationKey)) continue
     seenResponseIds.add(call.deduplicationKey)
@@ -992,8 +992,19 @@ async function parseSqliteGenMetadataCalls(filePath: string, cascadeId: string):
   try {
     db = openDatabase(filePath)
     const rows = db.query<AntigravityGenMetadataRow>('SELECT idx, data FROM gen_metadata ORDER BY idx')
-    const turnTools = parseSqliteSteps(db)
-    return buildCallsFromSqliteGenMetadata(cascadeId, rows, turnTools)
+    if (rows.length === 0) return []
+
+    const stepMap = new Map<number, AntigravityStepRow>()
+    try {
+      const stepRows = db.query<AntigravityStepRow>('SELECT idx, step_type, metadata FROM steps ORDER BY idx')
+      for (const step of stepRows) {
+        stepMap.set(step.idx, step)
+      }
+    } catch (err) {
+      if (isSqliteBusyError(err)) throw err
+    }
+
+    return buildCallsFromSqliteGenMetadata(cascadeId, rows, stepMap)
   } catch (err) {
     // Let a transient lock propagate so the run retries this file on the next
     // refresh instead of treating it as empty (see parser.ts busy handling).
