@@ -729,4 +729,219 @@ describe('antigravity provider helpers', () => {
       'C:\\Users\\Antigravity IDE\\.gemini\\antigravity\\conversations\\abc.db',
     )).toBe('antigravity')
   })
+
+  it('extracts tools, bash commands, MCP tools, and skills from SQLite steps table', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-steps-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      // Helper to encode synthetic protobuf tool metadata
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+
+      const encodeToolStepMetadata = (toolName: string, argsJson: string): Buffer => {
+        const toolCallSub = [
+          ...strField(1, 'call_test_123'),
+          ...strField(2, toolName),
+          ...strField(3, argsJson),
+        ]
+        return Buffer.from(lenField(4, toolCallSub))
+      }
+
+      const { DatabaseSync: Database } = requireForTest('node:sqlite')
+      const db = new Database(dbPath) as TestDb
+      try {
+        db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
+        const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
+        // Turn 0 (starts with step_type 15)
+        stmt.run(0, 15, null)
+        stmt.run(1, 132, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'git status' })))
+        stmt.run(2, 132, encodeToolStepMetadata('call_mcp_tool', JSON.stringify({ ServerName: 'dart-mcp-server', ToolName: 'analyze_files' })))
+        stmt.run(3, 132, encodeToolStepMetadata('view_file', JSON.stringify({ AbsolutePath: '/home/user/.agents/skills/graphify/SKILL.md' })))
+        stmt.run(4, 132, encodeToolStepMetadata('invoke_subagent', JSON.stringify({ Subagents: [{ Role: 'Codebase Researcher' }] })))
+        stmt.run(5, 132, encodeToolStepMetadata('find_by_name', JSON.stringify({ Pattern: '*.ts' })))
+      } finally {
+        db.close()
+      }
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls.length).toBeGreaterThan(0)
+      const firstCall = calls[0]!
+
+      expect(firstCall.tools).toEqual([
+        'run_command',
+        'mcp__dart-mcp-server__analyze_files',
+        'view_file',
+        'invoke_subagent',
+        'find_by_name',
+      ])
+      expect(firstCall.bashCommands).toEqual(['git status'])
+      expect(firstCall.skills).toEqual(['graphify'])
+      expect(firstCall.subagentTypes).toEqual(['Codebase Researcher'])
+    })
+  })
+
+  it('gracefully handles missing steps table in legacy DB', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-nosteps-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls[0]!.tools).toEqual([])
+      expect(calls[0]!.bashCommands).toEqual([])
+    })
+  })
+
+  it('gracefully handles malformed tool arguments JSON', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-badjson-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+
+      const encodeToolStepMetadata = (toolName: string, argsRaw: string): Buffer => {
+        const toolCallSub = [
+          ...strField(1, 'call_test_bad'),
+          ...strField(2, toolName),
+          ...strField(3, argsRaw),
+        ]
+        return Buffer.from(lenField(4, toolCallSub))
+      }
+
+      const { DatabaseSync: Database } = requireForTest('node:sqlite')
+      const db = new Database(dbPath) as TestDb
+      try {
+        db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
+        const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
+        stmt.run(0, 15, null)
+        stmt.run(1, 132, encodeToolStepMetadata('run_command', '{not valid json}'))
+        stmt.run(2, 132, encodeToolStepMetadata('call_mcp_tool', 'broken json'))
+      } finally {
+        db.close()
+      }
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls.length).toBeGreaterThan(0)
+      // Tool name is preserved even when args fail JSON.parse
+      expect(calls[0]!.tools).toEqual(['run_command', 'call_mcp_tool'])
+      expect(calls[0]!.bashCommands).toEqual([])
+    })
+  })
+
+  it('isolates tools strictly to their corresponding turn across multi-turn sessions', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-multiturn-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+
+      const encodeToolStepMetadata = (toolName: string, argsJson: string): Buffer => {
+        const toolCallSub = [
+          ...strField(1, 'call_test_turn0'),
+          ...strField(2, toolName),
+          ...strField(3, argsJson),
+        ]
+        return Buffer.from(lenField(4, toolCallSub))
+      }
+
+      const { DatabaseSync: Database } = requireForTest('node:sqlite')
+      const db = new Database(dbPath) as TestDb
+      try {
+        // Insert a second gen_metadata row with a distinct responseId
+        const firstRowData = Buffer.from(fixture.rows[0]!.hex, 'hex')
+        // Replace fixture-response-1 with fixture-response-2 in binary
+        const secondRowData = Buffer.from(firstRowData)
+        const resp1Idx = secondRowData.indexOf(Buffer.from('fixture-response-1'))
+        if (resp1Idx !== -1) {
+          secondRowData[resp1Idx + 'fixture-response-'.length] = '2'.charCodeAt(0)
+        }
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, secondRowData)
+
+        db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
+        const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
+        // Turn 0: step_type 15 + step_type 132 (has tool)
+        stmt.run(0, 15, null)
+        stmt.run(1, 132, encodeToolStepMetadata('run_command', JSON.stringify({ CommandLine: 'npm test' })))
+        // Turn 1: step_type 15 only (no tools)
+        stmt.run(2, 15, null)
+      } finally {
+        db.close()
+      }
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls).toHaveLength(2)
+
+      // Turn 0 has tools and bash command
+      expect(calls[0]!.tools).toEqual(['run_command'])
+      expect(calls[0]!.bashCommands).toEqual(['npm test'])
+
+      // Turn 1 has no tools and no bash commands (did not leak from Turn 0)
+      expect(calls[1]!.tools).toEqual([])
+      expect(calls[1]!.bashCommands).toEqual([])
+    })
+  })
 })
+

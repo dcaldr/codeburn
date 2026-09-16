@@ -36,11 +36,11 @@ command, uninstall restores that previous command.
 
 ## Storage format
 
-Protobuf. Cascade and response objects map to `ParsedProviderCall` directly.
+Protobuf and SQLite. For SQLite `.db` conversation files, token usage is extracted from the `gen_metadata` table, and tool execution events (tool calls, bash commands from `run_command`, MCP servers via `mcp__<server>__<tool>`, and skills from `SKILL.md` reads) are parsed from the `steps` table (`step_type = 132`). For older `.pb` files, cascade and response objects map to `ParsedProviderCall` directly via the language-server RPC.
 
 ## Caching
 
-Custom file cache at `$CODEBURN_CACHE_DIR/antigravity-results.v<n>.json` (defaults to `~/.cache/codeburn/`). The unsuffixed `antigravity-results.json` is left for older binaries; a matching-version copy is adopted once and never overwritten. The cache is also used as the data source when the RPC endpoint is unavailable, not just as an optimization. Bumping the cache version forces a recompute.
+Custom file cache at `$CODEBURN_CACHE_DIR/antigravity-results.v<n>.json` (version 6, defaults to `~/.cache/codeburn/`). The unsuffixed `antigravity-results.json` is left for older binaries; a matching-version copy is adopted once and never overwritten. The cache is also used as the data source when the RPC endpoint is unavailable, not just as an optimization. Bumping the cache version forces a recompute.
 
 ## Deduplication
 
