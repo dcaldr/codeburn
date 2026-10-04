@@ -18,6 +18,7 @@ import {
   parseAntigravityServerInfoFromLine,
   recordAntigravityStatusLinePayload,
   shouldReparseAntigravitySource,
+  normalizeAntigravityToolCall,
 } from '../../src/providers/antigravity.js'
 import type { ParsedProviderCall } from '../../src/providers/types.js'
 
@@ -812,6 +813,71 @@ describe('antigravity provider helpers', () => {
     })
   })
 
+  it('normalizes eager mcp_<server>_<tool> calls from steps table', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-eager-mcp-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      const dbPath = join(conversationsDir, `${fixture.conversationId}.db`)
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+
+      const encodeToolStepMetadata = (toolName: string, argsJson?: string): Buffer => {
+        const toolCallSub = [
+          ...strField(1, 'call_test_123'),
+          ...strField(2, toolName),
+          ...(argsJson !== undefined ? strField(3, argsJson) : []),
+        ]
+        return Buffer.from(lenField(4, toolCallSub))
+      }
+
+      const withStepIndices = (fixtureHex: string, indices: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed = Buffer.from(indices.flatMap(n => varint(n)))
+        const field2 = Buffer.from([...tag(2, 2), ...varint(packed.length), ...packed])
+        return Buffer.concat([field2, rest])
+      }
+
+      createCurrentAntigravityCliDb(dbPath, fixture)
+
+      const { DatabaseSync: Database } = requireForTest('node:sqlite')
+      const db = new Database(dbPath) as TestDb
+      try {
+        db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+          withStepIndices(fixture.rows[0]!.hex, [1, 2]),
+        )
+        db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
+        const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
+        stmt.run(0, 15, null)
+        stmt.run(1, 38, encodeToolStepMetadata('mcp_context7_resolve-library-id'))
+        stmt.run(2, 38, encodeToolStepMetadata('call_mcp_tool', JSON.stringify({ ServerName: 'context7', ToolName: 'resolve-library-id' })))
+      } finally {
+        db.close()
+      }
+
+      const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls[0]!.tools).toEqual([
+        'mcp__context7__resolve-library-id',
+        'mcp__context7__resolve-library-id',
+      ])
+    })
+  })
+
   it('gracefully handles missing steps table in legacy DB', async () => {
     if (!isSqliteAvailable()) return
 
@@ -1109,3 +1175,66 @@ describe('antigravity provider helpers', () => {
     })
 })
 
+describe('normalizeAntigravityToolCall', () => {
+  it('formats call_mcp_tool with PascalCase ServerName and ToolName as mcp__<server>__<tool>', () => {
+    expect(normalizeAntigravityToolCall('call_mcp_tool', { ServerName: 'context7', ToolName: 'resolve-library-id' }))
+      .toBe('mcp__context7__resolve-library-id')
+  })
+
+  it('formats call_mcp_tool with snake_case keys', () => {
+    expect(normalizeAntigravityToolCall('call_mcp_tool', { server_name: 'context7', tool_name: 'resolve-library-id' }))
+      .toBe('mcp__context7__resolve-library-id')
+  })
+
+  it('falls back to call_mcp_tool when args are missing or empty', () => {
+    expect(normalizeAntigravityToolCall('call_mcp_tool', null)).toBe('call_mcp_tool')
+    expect(normalizeAntigravityToolCall('call_mcp_tool', {})).toBe('call_mcp_tool')
+    expect(normalizeAntigravityToolCall('call_mcp_tool', { ServerName: '' })).toBe('call_mcp_tool')
+  })
+
+  it('normalizes eager mcp_<server>_<tool> into mcp__<server>__<tool>', () => {
+    expect(normalizeAntigravityToolCall('mcp_context7_resolve-library-id'))
+      .toBe('mcp__context7__resolve-library-id')
+    expect(normalizeAntigravityToolCall('mcp_dart-mcp-server_analyze_files'))
+      .toBe('mcp__dart-mcp-server__analyze_files')
+  })
+
+  it('preserves already canonical mcp__<server>__<tool>', () => {
+    expect(normalizeAntigravityToolCall('mcp__context7__resolve-library-id'))
+      .toBe('mcp__context7__resolve-library-id')
+  })
+
+  it('leaves non-mcp tools unchanged', () => {
+    expect(normalizeAntigravityToolCall('run_command')).toBe('run_command')
+    expect(normalizeAntigravityToolCall('view_file')).toBe('view_file')
+    expect(normalizeAntigravityToolCall('manage_task')).toBe('manage_task')
+    expect(normalizeAntigravityToolCall('search_web')).toBe('search_web')
+  })
+
+  it('leaves incomplete mcp prefixes unchanged', () => {
+    expect(normalizeAntigravityToolCall('mcp_')).toBe('mcp_')
+    expect(normalizeAntigravityToolCall('mcp_noservertool')).toBe('mcp_noservertool')
+  })
+  it('formats call_mcp_tool with camelCase keys', () => {
+    expect(normalizeAntigravityToolCall('call_mcp_tool', { serverName: 'context7', toolName: 'resolve-library-id' }))
+      .toBe('mcp__context7__resolve-library-id')
+  })
+
+  it('formats call_mcp_tool with short server/tool keys', () => {
+    expect(normalizeAntigravityToolCall('call_mcp_tool', { server: 'context7', tool: 'resolve-library-id' }))
+      .toBe('mcp__context7__resolve-library-id')
+  })
+
+  it('handles empty or falsy toolName safely', () => {
+    expect(normalizeAntigravityToolCall('')).toBe('')
+  })
+})
+
+describe('antigravity provider toolDisplayName', () => {
+  it('normalizes eager and canonical MCP tools to canonical display names', () => {
+    const provider = createAntigravityProvider()
+    expect(provider.toolDisplayName('mcp_context7_resolve-library-id')).toBe('mcp__context7__resolve-library-id')
+    expect(provider.toolDisplayName('mcp__context7__resolve-library-id')).toBe('mcp__context7__resolve-library-id')
+    expect(provider.toolDisplayName('run_command')).toBe('run_command')
+  })
+})

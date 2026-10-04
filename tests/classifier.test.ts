@@ -21,7 +21,7 @@ function makeCall(opts: Partial<ParsedApiCall> & { tools?: string[]; skills?: st
     tools,
     mcpTools: tools.filter(t => t.startsWith('mcp__')),
     skills: opts.skills ?? [],
-    hasAgentSpawn: tools.includes('Agent'),
+    hasAgentSpawn: tools.includes('Agent') || tools.includes('invoke_subagent'),
     hasPlanMode: tools.includes('EnterPlanMode'),
     speed: 'standard',
     timestamp: '2026-05-04T00:00:00Z',
@@ -216,3 +216,48 @@ describe('classifyTurn — retry detection via toolSequence', () => {
     expect(c.retries).toBe(0)
   })
 })
+
+describe('classifyTurn — Antigravity tool mappings', () => {
+  it('classifies manage_task without edits as planning', () => {
+    const turn = makeTurn([makeCall({ tools: ['manage_task'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('planning')
+  })
+
+  it('classifies search_web as exploration', () => {
+    const turn = makeTurn([makeCall({ tools: ['search_web'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('exploration')
+  })
+
+  it('classifies read_url_content as exploration', () => {
+    const turn = makeTurn([makeCall({ tools: ['read_url_content'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('exploration')
+  })
+
+  it('classifies invoke_subagent as delegation via hasAgentSpawn', () => {
+    const turn = makeTurn([makeCall({ tools: ['invoke_subagent'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('delegation')
+  })
+
+  it('prioritizes delegation when invoke_subagent is present alongside search tools', () => {
+    const turn = makeTurn([makeCall({ tools: ['invoke_subagent', 'search_web'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('delegation')
+  })
+
+  it('classifies manage_task with edits as coding', () => {
+    const turn = makeTurn([makeCall({ tools: ['manage_task', 'Edit'] })])
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('coding')
+  })
+
+  it('refines search_web exploration to debugging when user message mentions errors', () => {
+    const turn = makeTurn([makeCall({ tools: ['search_web'] })], 'fix 404 error on docs')
+    const c = classifyTurn(turn)
+    expect(c.category).toBe('debugging')
+  })
+})
+
