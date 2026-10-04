@@ -21,8 +21,39 @@ import {
   normalizeAntigravityToolCall,
 } from '../../src/providers/antigravity.js'
 import type { ParsedProviderCall } from '../../src/providers/types.js'
+import { classifyTurn } from '../../src/classifier.js'
+import type { ParsedApiCall, ParsedTurn } from '../../src/types.js'
 
 const requireForTest = createRequire(import.meta.url)
+
+// Mirrors the parsed-call -> turn shape src/parser.ts builds (cachedCallToApiCall).
+function turnFromCall(call: ParsedProviderCall): ParsedTurn {
+  const apiCall: ParsedApiCall = {
+    provider: call.provider,
+    model: call.model,
+    usage: {
+      inputTokens: call.inputTokens,
+      outputTokens: call.outputTokens,
+      cacheCreationInputTokens: call.cacheCreationInputTokens,
+      cacheReadInputTokens: call.cacheReadInputTokens,
+      cachedInputTokens: call.cachedInputTokens,
+      reasoningTokens: call.reasoningTokens,
+      webSearchRequests: call.webSearchRequests,
+    },
+    costUSD: call.costUSD,
+    tools: call.tools,
+    mcpTools: call.tools.filter(t => t.startsWith('mcp__')),
+    skills: call.skills ?? [],
+    subagentTypes: call.subagentTypes ?? [],
+    hasAgentSpawn: call.tools.includes('Agent'),
+    hasPlanMode: call.tools.includes('EnterPlanMode'),
+    speed: call.speed,
+    timestamp: call.timestamp,
+    bashCommands: call.bashCommands,
+    deduplicationKey: call.deduplicationKey,
+  }
+  return { userMessage: '', assistantCalls: [apiCall], timestamp: call.timestamp, sessionId: call.sessionId }
+}
 
 type CurrentCliFixture = {
   conversationId: string
@@ -803,7 +834,7 @@ describe('antigravity provider helpers', () => {
         'run_command',
         'mcp__dart-mcp-server__analyze_files',
         'view_file',
-        'invoke_subagent',
+        'Agent',
         'find_by_name',
         'write_to_file',
       ])
@@ -875,6 +906,70 @@ describe('antigravity provider helpers', () => {
         'mcp__context7__resolve-library-id',
         'mcp__context7__resolve-library-id',
       ])
+    })
+  })
+
+  it('maps manage_task, search_web, read_url_content and invoke_subagent to canonical tools that classify', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-tool-map-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-cli-current/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+
+      const varint = (n: number): number[] => {
+        const out: number[] = []
+        let v = n
+        while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128) }
+        out.push(v)
+        return out
+      }
+      const tag = (field: number, wire: number): number[] => varint(field * 8 + wire)
+      const lenField = (field: number, bytes: number[]): number[] => [...tag(field, 2), ...varint(bytes.length), ...bytes]
+      const strField = (field: number, str: string): number[] => lenField(field, Array.from(Buffer.from(str, 'utf-8')))
+      const encodeToolStepMetadata = (toolName: string, argsJson: string): Buffer =>
+        Buffer.from(lenField(4, [...strField(1, 'call_test_123'), ...strField(2, toolName), ...strField(3, argsJson)]))
+      const withStepIndices = (fixtureHex: string, indices: number[]): Buffer => {
+        const rest = Buffer.from(fixtureHex, 'hex').subarray(4)
+        const packed = Buffer.from(indices.flatMap(n => varint(n)))
+        return Buffer.concat([Buffer.from([...tag(2, 2), ...varint(packed.length), ...packed]), rest])
+      }
+
+      const callWithTools = async (name: string, toolNames: string[]): Promise<ParsedProviderCall> => {
+        const dir = join(tempHome, name)
+        await mkdir(dir, { recursive: true })
+        const dbPath = join(dir, `${fixture.conversationId}.db`)
+        createCurrentAntigravityCliDb(dbPath, fixture)
+        const { DatabaseSync: Database } = requireForTest('node:sqlite')
+        const db = new Database(dbPath) as TestDb
+        try {
+          db.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(
+            withStepIndices(fixture.rows[0]!.hex, toolNames.map((_, i) => i + 1)),
+          )
+          db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, metadata blob)')
+          const stmt = db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)')
+          stmt.run(0, 15, null)
+          toolNames.forEach((tool, i) => stmt.run(i + 1, 38, encodeToolStepMetadata(tool, '{}')))
+        } finally {
+          db.close()
+        }
+        const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+        expect(calls.length).toBeGreaterThan(0)
+        return calls[0]!
+      }
+
+      const planning = await callWithTools('planning', ['manage_task'])
+      expect(planning.tools).toEqual(['TodoWrite'])
+      expect(classifyTurn(turnFromCall(planning)).category).toBe('planning')
+
+      const exploration = await callWithTools('exploration', ['search_web', 'read_url_content'])
+      expect(exploration.tools).toEqual(['WebSearch', 'WebFetch'])
+      expect(classifyTurn(turnFromCall(exploration)).category).toBe('exploration')
+
+      const delegation = await callWithTools('delegation', ['invoke_subagent', 'search_web'])
+      expect(delegation.tools).toEqual(['Agent', 'WebSearch'])
+      expect(classifyTurn(turnFromCall(delegation)).category).toBe('delegation')
     })
   })
 
@@ -1209,6 +1304,11 @@ describe('normalizeAntigravityToolCall', () => {
     expect(normalizeAntigravityToolCall('view_file')).toBe('view_file')
     expect(normalizeAntigravityToolCall('manage_task')).toBe('manage_task')
     expect(normalizeAntigravityToolCall('search_web')).toBe('search_web')
+  })
+
+  it('splits eager mcp names at the first underscore, misattributing servers with underscores', () => {
+    expect(normalizeAntigravityToolCall('mcp_github_mcp_server_create_issue'))
+      .toBe('mcp__github__mcp_server_create_issue')
   })
 
   it('leaves incomplete mcp prefixes unchanged', () => {

@@ -829,6 +829,13 @@ function antigravitySqliteCreatedAt(chatFields: readonly ProtoField[]): string {
 
 const SKILL_MD_PATTERN = /(?:^|[\\/])([^\\/]+)[\\/]SKILL\.md$/i
 
+const toolNameMap: Record<string, string> = {
+  invoke_subagent: 'Agent',
+  manage_task: 'TodoWrite',
+  search_web: 'WebSearch',
+  read_url_content: 'WebFetch',
+}
+
 /**
  * Normalizes Antigravity tool calls to the canonical Codeburn format (`mcp__<server>__<tool>`).
  *
@@ -859,6 +866,7 @@ export function normalizeAntigravityToolCall(toolName: string, args?: Record<str
 
   if (toolName.startsWith('mcp_')) {
     const rest = toolName.slice(4)
+    // ponytail: first-underscore split misattributes servers whose names contain '_'; upgrade: longest-prefix match against mcp_config.json server keys
     const sep = rest.indexOf('_')
     if (sep > 0 && sep < rest.length - 1) {
       const server = rest.slice(0, sep)
@@ -917,7 +925,7 @@ function extractAntigravityToolFromStep(metadataBytes: Uint8Array, turn: TurnToo
     }
 
     if (toolName === 'invoke_subagent') {
-      turn.tools.push(toolName)
+      turn.tools.push(toolNameMap[toolName])
       if (Array.isArray(args?.['Subagents'])) {
         for (const sa of args['Subagents']) {
           if (sa && typeof sa === 'object') {
@@ -934,7 +942,7 @@ function extractAntigravityToolFromStep(metadataBytes: Uint8Array, turn: TurnToo
       continue
     }
 
-    turn.tools.push(normalizeAntigravityToolCall(toolName, args))
+    turn.tools.push(toolNameMap[toolName] ?? normalizeAntigravityToolCall(toolName, args))
   }
 }
 
