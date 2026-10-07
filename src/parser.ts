@@ -5,7 +5,7 @@ import { createHash } from 'crypto'
 import { performance } from 'node:perf_hooks'
 import { basename, dirname, join, resolve, sep } from 'path'
 import { FS_SCAN_CONCURRENCY, mapWithConcurrency, readSessionLines } from './fs-utils.js'
-import { billableOutputTokens, calculateCost, calculateLocalModelSavings, getShortModelName, modelRowKey, pricingModelAt, isProxiedPath, getProxyPathsConfigHash, getModelAliasesConfigHash, getPriceOverridesConfigHash, getLocalModelSavingsConfigHash, recordedCostFallback } from './models.js'
+import { billableOutputTokens, calculateCost, calculateLocalModelSavings, getShortModelName, modelRowKey, pricingModelAt, isProxiedPath, getProxyPathsConfigHash, getModelAliasesConfigHash, getPriceOverridesConfigHash, getLocalModelSavingsConfigHash, recordedCostFallback, getModelRoute } from './models.js'
 import { resolveSubagentAttribution, sessionIdentity } from './sessions-report.js'
 import { normalizeContentBlocks, flatSlice, flatString } from './content-utils.js'
 import { discoverAllSessions, discoverAllSessionsWithFailures, getProvider } from './providers/index.js'
@@ -2066,9 +2066,11 @@ async function scanProjectDirs(
   // mid-scan then resumes from a warm cache instead of re-parsing from zero.
   onFileParsed?: () => Promise<void>,
   readOnly = false,
+  preservedSourcePaths: string[] = [],
 ): Promise<ProjectSummary[]> {
   const section = getOrCreateProviderSection(diskCache, 'claude')
   const allDiscoveredFiles = new Set<string>()
+  for (const path of preservedSourcePaths) allDiscoveredFiles.add(path)
 
   type FileInfo = { dirName: string; fp: NonNullable<Awaited<ReturnType<typeof fingerprintFile>>>; source?: SessionSourceMetadata }
   const unchangedFiles: Array<{ filePath: string; dirName: string; source?: SessionSourceMetadata; cached: CachedFile }> = []
@@ -3598,7 +3600,9 @@ export async function parseProviderSources(
 
   const wslHomesForOrphans = refreshWslHomesForOrphans(Object.keys(section.files), allDiscoveredFiles)
 
-  if (readOnly) {
+  // scanProjectDirs serves Claude's orphans; the Cowork ledger pass shares
+  // the claude section and would serve every transcript a second time.
+  if (readOnly && providerName !== 'claude') {
     for (const [path, cached] of cacheEntriesInLoadOrder(diskCache, providerName)) {
       if (allDiscoveredFiles.has(path)) continue
       if (isCacheStub(cached)) {
@@ -3911,7 +3915,11 @@ export async function parseProviderSources(
     markCacheDirty(diskCache, providerName)
   }
 
-  if (!readOnly && !provider.durableSources) {
+  // Claude's transcript tree and Cowork's usage ledger share one provider
+  // cache section but are reconciled by two different parsers. The transcript
+  // scanner owns ordinary Claude-source eviction; the ledger pass must not
+  // interpret the transcript paths as ledger orphans and delete them.
+  if (!readOnly && !provider.durableSources && providerName !== 'claude') {
     for (const cachedPath of Object.keys(section.files)) {
       if (allDiscoveredFiles.has(cachedPath)) continue
       const wslStatus = classifyWslCachePath(cachedPath, wslHomesForOrphans)
@@ -4235,7 +4243,7 @@ export async function parseProviderSources(
 
   // Query-time: derive SessionSummary from all cached turns.
   // Uses seenKeys (shared across providers) for cross-provider dedup.
-  const sessionMap = new Map<string, { project: string; projectPath?: string; workingDirectory?: string; turns: ClassifiedTurn[]; prLinks?: Set<string>; title?: string; lineage?: SessionLineage; agentName?: string; agentStartedAt?: string }>()
+  const sessionMap = new Map<string, { project: string; projectPath?: string; workingDirectory?: string; turns: ClassifiedTurn[]; prLinks?: Set<string>; title?: string; lineage?: SessionLineage; agentName?: string; agentStartedAt?: string; source?: SessionSourceMetadata }>()
 
   for (const source of servedSources) {
     const cachedFile = section.files[source.path]
@@ -4247,6 +4255,18 @@ export async function parseProviderSources(
       }
       continue
     }
+    const sourceMetadata: SessionSourceMetadata | undefined = providerName === 'claude' &&
+      source.sourceId &&
+      source.sourceLabel &&
+      source.sourcePath &&
+      source.sourceKind
+      ? {
+          id: source.sourceId,
+          label: source.sourceLabel,
+          path: source.sourcePath,
+          kind: source.sourceKind,
+        }
+      : undefined
 
     for (const rawTurn of cachedFile.turns) {
       const turn = serveTurn(rawTurn)
@@ -4301,6 +4321,7 @@ export async function parseProviderSources(
         if (!existing.lineage && cachedFile.lineage) existing.lineage = cachedFile.lineage
         if (!existing.agentName && cachedFile.agentName) existing.agentName = cachedFile.agentName
         if (!existing.agentStartedAt && cachedFile.agentStartedAt) existing.agentStartedAt = cachedFile.agentStartedAt
+        if (!existing.source && sourceMetadata) existing.source = sourceMetadata
       } else {
         sessionMap.set(key, {
           project,
@@ -4312,6 +4333,7 @@ export async function parseProviderSources(
           ...(cachedFile.lineage ? { lineage: cachedFile.lineage } : {}),
           ...(cachedFile.agentName ? { agentName: cachedFile.agentName } : {}),
           ...(cachedFile.agentStartedAt ? { agentStartedAt: cachedFile.agentStartedAt } : {}),
+          ...(sourceMetadata ? { source: sourceMetadata } : {}),
         })
       }
     }
@@ -4322,7 +4344,7 @@ export async function parseProviderSources(
   // counted here so the monthly total never drops.
   // WSL orphans join them for every provider: their distro being stopped must
   // not drop the spend from the totals for the length of a shutdown (#1059).
-  if (provider.durableSources || Object.keys(section.files).some(isWslUncPath)) {
+  if (providerName !== 'claude' && (provider.durableSources || Object.keys(section.files).some(isWslUncPath))) {
     for (const [cachedPath, cachedFile] of Object.entries(section.files)) {
       if (!provider.durableSources && !isWslUncPath(cachedPath)) continue
       if (allDiscoveredFiles.has(cachedPath)) continue  // already counted above
@@ -4522,12 +4544,12 @@ export async function parseProviderSources(
   // (first projectPath wins) before mergeProjectsByCrossProviderKey could see
   // distinct abs identities.
   const projectMap = new Map<string, { project: string; projectPath?: string; sessions: SessionSummary[] }>()
-  for (const [key, { project, projectPath, workingDirectory, turns, prLinks, title, lineage, agentName, agentStartedAt }] of sessionMap) {
+  for (const [key, { project, projectPath, workingDirectory, turns, prLinks, title, lineage, agentName, agentStartedAt, source }] of sessionMap) {
     const sessionId = key.split(':')[1] ?? key
     const assembledTurns = providerName === 'copilot'
       ? foldCopilotSupplementaryTurns(sessionId, turns, copilotRecon?.supplementaryStoreKeys)
       : turns
-    const session = buildSessionSummary(sessionId, project, assembledTurns)
+    const session = buildSessionSummary(sessionId, project, assembledTurns, undefined, source)
     const explicitLinks = new Set(assembledTurns.flatMap(turn => turn.prRefs ?? []))
     for (const link of prLinks ?? []) explicitLinks.add(link)
     if (explicitLinks.size) {
@@ -5474,6 +5496,94 @@ export function filterProjectsByCall(projects: ProjectSummary[], keep: (call: Pa
   return filtered.sort((a, b) => b.totalCostUSD - a.totalCostUSD)
 }
 
+const CLAUDE_LEDGER_MATCH_WINDOW_MS = 30 * 1000
+
+function claudeLedgerModelIdentity(model: string): { base: string; route?: string } {
+  const routed = getModelRoute(model)
+  return {
+    base: (routed?.baseModel ?? model).toLowerCase(),
+    ...(routed?.variant ? { route: routed.variant.toLowerCase() } : {}),
+  }
+}
+
+function claudeLedgerCallMatchesTranscript(ledgerCall: ParsedApiCall, transcriptCall: ParsedApiCall): boolean {
+  const ledgerModel = claudeLedgerModelIdentity(ledgerCall.model)
+  const transcriptModel = claudeLedgerModelIdentity(transcriptCall.model)
+  if (ledgerModel.base !== transcriptModel.base) return false
+  // Matching normalizes only the Bedrock wrapper. Pricing still receives each
+  // call's raw model id. A bare transcript model can be paired with the routed
+  // ledger id; when both sides carry an explicit route, keep different
+  // geographic SKUs separate.
+  if (ledgerModel.route && transcriptModel.route && ledgerModel.route !== transcriptModel.route) return false
+
+  const ledgerUsage = ledgerCall.usage
+  const transcriptUsage = transcriptCall.usage
+  if (
+    ledgerUsage.inputTokens !== transcriptUsage.inputTokens ||
+    ledgerUsage.outputTokens !== transcriptUsage.outputTokens ||
+    ledgerUsage.cacheCreationInputTokens !== transcriptUsage.cacheCreationInputTokens ||
+    ledgerUsage.cacheReadInputTokens !== transcriptUsage.cacheReadInputTokens ||
+    ledgerUsage.webSearchRequests !== transcriptUsage.webSearchRequests
+  ) {
+    return false
+  }
+
+  const ledgerTimestamp = Date.parse(ledgerCall.timestamp)
+  const transcriptTimestamp = Date.parse(transcriptCall.timestamp)
+  if (!Number.isFinite(ledgerTimestamp) || !Number.isFinite(transcriptTimestamp)) return false
+  return Math.abs(ledgerTimestamp - transcriptTimestamp) <= CLAUDE_LEDGER_MATCH_WINDOW_MS
+}
+
+function claudeLedgerUsageKey(call: ParsedApiCall): string {
+  const u = call.usage
+  return `${claudeLedgerModelIdentity(call.model).base}|${u.inputTokens}|${u.outputTokens}|${u.cacheCreationInputTokens}|${u.cacheReadInputTokens}|${u.webSearchRequests}`
+}
+
+/// Claude Desktop 3p writes a usage-ledger record alongside a Claude
+/// transcript. The two records have different keys, so the normal parser
+/// deduplication cannot see that they are the same request. Keep the
+/// transcript call, which carries the project, tools and turn classification,
+/// and drop a ledger call only on a one-to-one token/model/timestamp match.
+/// A ledger call whose transcript was deleted stays counted.
+function deduplicateClaudeDesktopLedger(
+  ledgerProjects: ProjectSummary[],
+  transcriptProjects: ProjectSummary[],
+): ProjectSummary[] {
+  if (ledgerProjects.length === 0) return ledgerProjects
+  const transcriptCalls = new Map<string, ParsedApiCall[]>()
+  for (const project of transcriptProjects) {
+    for (const session of project.sessions) {
+      for (const turn of session.turns) {
+        for (const call of turn.assistantCalls) {
+          const key = claudeLedgerUsageKey(call)
+          const bucket = transcriptCalls.get(key)
+          if (bucket) bucket.push(call)
+          else transcriptCalls.set(key, [call])
+        }
+      }
+    }
+  }
+  if (transcriptCalls.size === 0) return ledgerProjects
+
+  const matched = new Set<ParsedApiCall>()
+  return filterProjectsByCall(ledgerProjects, ledgerCall => {
+    let best: ParsedApiCall | undefined
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const transcriptCall of transcriptCalls.get(claudeLedgerUsageKey(ledgerCall)) ?? []) {
+      if (matched.has(transcriptCall)) continue
+      if (!claudeLedgerCallMatchesTranscript(ledgerCall, transcriptCall)) continue
+      const distance = Math.abs(Date.parse(ledgerCall.timestamp) - Date.parse(transcriptCall.timestamp))
+      if (distance < bestDistance) {
+        best = transcriptCall
+        bestDistance = distance
+      }
+    }
+    if (!best) return true
+    matched.add(best)
+    return false
+  })
+}
+
 export function filterProjectsByDateRange(projects: ProjectSummary[], dateRange: DateRange): ProjectSummary[] {
   const sliceStartMs = dateRange.start.getTime()
   const filtered: ProjectSummary[] = []
@@ -5661,7 +5771,7 @@ export async function computeCorpusFingerprint(providerFilter?: string): Promise
       envFingerprinted.add(source.provider)
       entries.push(`env:${source.provider}|${computeEnvFingerprint(source.provider)}`)
     }
-    if (source.provider === 'claude') {
+    if (source.provider === 'claude' && source.sourceKind !== 'claude-desktop-ledger') {
       for (const filePath of await collectJsonlFiles(source.path)) await record(filePath)
       continue
     }
@@ -6177,6 +6287,8 @@ async function runParseInner(
   traceTiming('discovery', ` sources=${allSources.length}`)
 
   const claudeSources = allSources.filter(s => s.provider === 'claude')
+  const claudeLedgerSources = claudeSources.filter(s => s.sourceKind === 'claude-desktop-ledger')
+  const claudeProjectSources = claudeSources.filter(s => s.sourceKind !== 'claude-desktop-ledger')
   const nonClaudeSources = allSources.filter(s => s.provider !== 'claude')
 
   const providerGroups = new Map<string, SessionSource[]>()
@@ -6211,7 +6323,7 @@ async function runParseInner(
     ...providerGroups.keys(),
   ] })
 
-  const claudeDirs = claudeSources.map(s => ({
+  const claudeDirs = claudeProjectSources.map(s => ({
     path: s.path,
     name: s.project,
     source: s.sourceId && s.sourceLabel && s.sourcePath && s.sourceKind
@@ -6231,7 +6343,27 @@ async function runParseInner(
   let claudeProjects: ProjectSummary[] = []
   if (claudeInScope) {
     try {
-      claudeProjects = await scanProjectDirs(claudeDirs, seenMsgIds, diskCache, dateRange, saveProgress, readOnly)
+      claudeProjects = await scanProjectDirs(
+        claudeDirs,
+        seenMsgIds,
+        diskCache,
+        dateRange,
+        saveProgress,
+        readOnly,
+        claudeLedgerSources.map(source => source.path),
+      )
+      if (claudeLedgerSources.length > 0) {
+        const ledgerProjects = await parseProviderSources(
+          'claude',
+          claudeLedgerSources,
+          seenKeys,
+          diskCache,
+          dateRange,
+          saveProgress,
+          readOnly,
+        )
+        claudeProjects.push(...deduplicateClaudeDesktopLedger(ledgerProjects, claudeProjects))
+      }
       if (claudeSources.length > 0) emitScanProgress({ kind: 'provider', provider: 'claude', state: 'done', files: claudeSources.length })
     } catch (err) {
       if (!isPermissionError(err)) throw err
