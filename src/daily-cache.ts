@@ -314,7 +314,13 @@ import type { DateRange, ProjectSummary } from './types.js'
 // From 11 Sep 2026 the alias served K2.8 Preview, which has no published rate;
 // those calls price as K2.7 Code and are marked estimated.
 // Calls are unchanged, so no PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
-export const DAILY_CACHE_VERSION = 64
+// v65: Grok Build reads per-request usage from logs/unified.jsonl and uses it
+// in place of a session dir's one-call rollup for every session the log holds;
+// days finalized without it re-derive. A logged session's single rollup call,
+// dated at its last activity, becomes one call per request dated at that
+// request, so a session that crossed midnight moves calls to an earlier day and
+// grok joins PENDING_REDERIVE_PROVIDER_VERSIONS at 65.
+export const DAILY_CACHE_VERSION = 65
 const MIN_SUPPORTED_VERSION = 28
 
 /// Providers whose per-day CALL COUNT means something different at
@@ -360,6 +366,9 @@ const PENDING_REDERIVE_PROVIDER_VERSIONS: Readonly<Record<string, number>> = {
   // 59: standalone rows without created_at moved from the file mtime to the
   // first step's time.
   antigravity: 59,
+  // 65: logged sessions moved from one rollup at last activity to per-request
+  // calls at request time.
+  grok: 65,
 }
 
 function providersPendingRederiveFrom(fromVersion: number): string[] {

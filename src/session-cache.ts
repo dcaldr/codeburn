@@ -484,7 +484,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // authoritative-usage-v4: persist one Grok session call from top-level
   // authoritative totals, use modelUsage only for priced attribution, clamp
   // reasoning per record, and label mixed sessions estimated.
-  grok: 'authoritative-usage-v4',
+  // unified-log-v1: per-request usage from logs/unified.jsonl replaces the
+  // session-dir rollup for every session the log holds.
+  grok: 'authoritative-usage-v4-unified-log-v1',
   // Estimated from message text: Grok Bot's local mirror records no tokens.
   // import-guess-est-v1: synced Grok Bot rows with no dollar amount are estimated.
   grokbot: 'estimated-usage-v1-import-guess-est-v1',
