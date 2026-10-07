@@ -320,7 +320,10 @@ import type { DateRange, ProjectSummary } from './types.js'
 // dated at its last activity, becomes one call per request dated at that
 // request, so a session that crossed midnight moves calls to an earlier day and
 // grok joins PENDING_REDERIVE_PROVIDER_VERSIONS at 65.
-export const DAILY_CACHE_VERSION = 65
+// v66: Codex fork replay bursts drop only records found in the parent rollout;
+// burst records the parent kept only inside a running total now count. Calls
+// only rise, so no PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
+export const DAILY_CACHE_VERSION = 66
 const MIN_SUPPORTED_VERSION = 28
 
 /// Providers whose per-day CALL COUNT means something different at
