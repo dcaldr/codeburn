@@ -7,19 +7,20 @@ import { isRooted, projectVisible } from '../lib/projectMatch'
 import type { ProjectFilter, ProjectRow } from '../lib/types'
 import { Dropdown, type DropdownOption } from './Dropdown'
 
-export type TransientProject = { name: string; path: string }
+/** `path` is one checkout; the CLI widens it to its whole repository. */
+export type TransientProject = { name: string; path: string; label?: string }
 
 const ALL = ''
 const MAX_SHOWN = 100
 
 /** Projects the saved filter shows, costliest first. Only rows with an
- *  absolute path: a bucket with no session cwd (an import, a provider's label
+ *  absolute path, and the temporary-folders row: a bucket with no session cwd (an import, a provider's label
  *  fallback) reports its label as the path, and no rooted filter selects it.
  *  Rows that round to $0.00 are left out too, they would show nothing. */
 export function projectScopeOptions(projects: ProjectRow[], filter: ProjectFilter): Array<DropdownOption & { name: string }> {
   const byPath = new Map<string, ProjectRow>()
   for (const project of projects) {
-    if (!isRooted(project.path) || !projectVisible(project, filter)) continue
+    if ((!isRooted(project.path) && !project.temporary) || !projectVisible(project, filter)) continue
     const path = project.path.trim()
     const held = byPath.get(path)
     if (!held || (held.cost ?? 0) < (project.cost ?? 0)) byPath.set(path, project)
@@ -32,7 +33,7 @@ export function projectScopeOptions(projects: ProjectRow[], filter: ProjectFilte
   }
   return rows.map(([path, project]) => {
     const label = shortenProjectPath(path, 2)
-    return { value: path, label: labels.get(label)! > 1 ? path : label, name: project.name }
+    return { value: path, label: project.temporary ? t('shell.project.temporary') : project.checkouts ? project.name : labels.get(label)! > 1 ? path : label, name: project.name }
   })
 }
 
@@ -68,7 +69,7 @@ export function ProjectScopePicker({ value, onSelect }: { value: TransientProjec
 
   const matches = matchProjectOptions(options ?? [], query)
   const shown = matches.slice(0, MAX_SHOWN)
-  const selected = value ? { value: value.path, label: shortenProjectPath(value.path, 2), name: value.name } : null
+  const selected = value ? { value: value.path, label: value.label ?? shortenProjectPath(value.path, 2), name: value.name } : null
   const list: DropdownOption[] = query.trim()
     ? shown
     : [
@@ -91,7 +92,10 @@ export function ProjectScopePicker({ value, onSelect }: { value: TransientProjec
       onChange={path => {
         if (path === ALL) { onSelect(null); return }
         const option = options?.find(entry => entry.value === path) ?? selected
-        if (option) onSelect({ name: option.name, path: option.value })
+        if (!option) return
+        // Only a repository row is named apart from its path.
+        const named = option.label !== option.value && option.label !== shortenProjectPath(option.value, 2)
+        onSelect({ name: option.name, path: option.value, ...(named ? { label: option.label } : {}) })
       }}
       footer={footer}
       search={{ value: query, onChange: setQuery, placeholder: t('shell.project.search'), ariaLabel: t('shell.project.search') }}

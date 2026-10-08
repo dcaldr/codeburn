@@ -5,6 +5,7 @@ import { join } from 'path'
 
 import { getCodeburnCacheDir, RETIRED_PROVIDER_NAMES } from './cache-dir.js'
 import { sweepSupersededCacheFiles } from './cache-sweep.js'
+import { projectOriginKey } from './git-origin.js'
 import type { ProjectFilterTarget } from './parser.js'
 import type { DateRange, ProjectSummary } from './types.js'
 
@@ -336,7 +337,11 @@ import type { DateRange, ProjectSummary } from './types.js'
 // project rows; provider call counts and cost are unchanged, so no
 // PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed. Days whose transcripts
 // are gone keep their old single-project attribution.
-export const DAILY_CACHE_VERSION = 69
+// v70: a day's project entry records the `origin` remote of its checkout, so
+// clones and worktrees of one repository still group once the folder is
+// deleted. Totals and the split are unchanged; surviving days re-derive to
+// pick it up, carried days stay as they were.
+export const DAILY_CACHE_VERSION = 70
 const MIN_SUPPORTED_VERSION = 28
 
 /// Providers whose per-day CALL COUNT means something different at
@@ -414,7 +419,7 @@ export type CategoryDayStats = { turns: number; cost: number; savingsUSD: number
 /// `path` is the project's filesystem path when known — it is what display
 /// layers derive a friendly name from once the sessions that carried the
 /// mapping are gone.
-export type ProjectDayStats = { cost: number; calls: number; savingsUSD: number; sessions: number; path?: string }
+export type ProjectDayStats = { cost: number; calls: number; savingsUSD: number; sessions: number; path?: string; originKey?: string }
 
 /// One project label can span several real paths (every Claude session started
 /// from the home folder shares `-Users-<name>`), so since v67 a day's project
@@ -429,7 +434,7 @@ export function projectDayKey(project: string, path?: string): string {
 
 export function projectDayIdentity(key: string, stats: ProjectDayStats): ProjectFilterTarget & { projectPath: string } {
   const sep = key.indexOf(PROJECT_KEY_SEP)
-  return { project: sep === -1 ? key : key.slice(0, sep), projectPath: stats.path ?? '' }
+  return { project: sep === -1 ? key : key.slice(0, sep), projectPath: stats.path ?? '', ...(stats.originKey ? { originKey: stats.originKey } : {}) }
 }
 
 export type ProviderDaySlice = {
@@ -629,6 +634,7 @@ function sanitizeProjects(raw: unknown): { projects?: DailyEntry['projects'] } {
       savingsUSD: num(p.savingsUSD),
       sessions: num(p.sessions),
       ...(typeof p.path === 'string' && p.path.length > 0 ? { path: p.path } : {}),
+      ...(typeof p.originKey === 'string' && p.originKey.length > 0 ? { originKey: p.originKey } : {}),
     })
   }
   return Object.keys(out).length > 0 ? { projects: out } : {}
@@ -831,7 +837,7 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   const now = new Date()
   const todayStr = toDateString(now)
   const yesterdayStr = toDateString(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
-  days = applyRetention(days.filter(d => d.date < todayStr), yesterdayStr)
+  days = stampOrigins(applyRetention(days.filter(d => d.date < todayStr), yesterdayStr))
   // A trusted base can carry lastComputedDate >= today (clock skew wrote a
   // frozen today entry that the purge above just removed). Left as-is it would
   // make hydration skip the gap parse forever and the purged day would never
@@ -865,6 +871,22 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   }
   await saveDailyCache(adopted).catch(() => {})
   return adopted
+}
+
+/// Adopted days written before v70 learn the repository of each checkout that
+/// still exists, so the record outlives the folder. Days whose folder is gone
+/// keep their path alone.
+function stampOrigins(days: DailyEntry[]): DailyEntry[] {
+  for (const day of days) {
+    for (const holder of [day, ...Object.values(day.providers)]) {
+      for (const p of Object.values(holder.projects ?? {})) {
+        if (p.originKey || !p.path) continue
+        const originKey = projectOriginKey(p.path)
+        if (originKey) p.originKey = originKey
+      }
+    }
+  }
+  return days
 }
 
 export async function saveDailyCache(cache: DailyCache): Promise<void> {
@@ -1008,6 +1030,7 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
     acc.calls += num(p.calls)
     acc.savingsUSD += num(p.savingsUSD)
     if (!acc.path && typeof p.path === 'string') acc.path = p.path
+    if (!acc.originKey && typeof p.originKey === 'string') acc.originKey = p.originKey
     // Same session dedup as the slice-level sessions above: a placeholder's
     // project sessions were already counted into the day when the fresh day
     // was built, so only the excess is added.
@@ -1140,7 +1163,7 @@ function subtractProjectStats(base: ProjectDayStats, sub: ProjectDayStats): Proj
   const savingsUSD = Math.max(0, (base.savingsUSD ?? 0) - (sub.savingsUSD ?? 0))
   const sessions = Math.max(0, (base.sessions ?? 0) - (sub.sessions ?? 0))
   if (cost === 0 && calls === 0 && savingsUSD === 0 && sessions === 0) return null
-  return { cost, calls, savingsUSD, sessions, ...(base.path ? { path: base.path } : {}) }
+  return { cost, calls, savingsUSD, sessions, ...(base.path ? { path: base.path } : {}), ...(base.originKey ? { originKey: base.originKey } : {}) }
 }
 
 function subtractProjects(base: DailyEntry['projects'] | undefined, sub: DailyEntry['projects'] | undefined): DailyEntry['projects'] | undefined {

@@ -944,10 +944,10 @@ describe('project filter', () => {
       expect(await handlers['codeburn:setTransientProject']!('/Users/me/work/-app')).toEqual({ ok: true, value: undefined })
       await handlers['codeburn:getSessions']!('week', 'all')
       // The pick replaces the saved includes; the saved excludes still apply.
-      expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project=/Users/me/work/-app', '--exclude=scratch'])
+      expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project==/Users/me/work/-app', '--exclude=scratch'])
       // A project pick is local data: combined is dropped like with any filter.
       await handlers['codeburn:getOverview']!('30days', 'all', undefined, undefined, undefined, 'combined')
-      expect(calls[1]).toEqual(['status', '--format', 'menubar-json', '--period', '30days', '--no-timeline', '--no-optimize', '--project=/Users/me/work/-app', '--exclude=scratch'])
+      expect(calls[1]).toEqual(['status', '--format', 'menubar-json', '--period', '30days', '--no-timeline', '--no-optimize', '--project==/Users/me/work/-app', '--exclude=scratch'])
       // Not project-scoped: plans, the Projects pane list, and exports.
       await handlers['codeburn:getPlans']!('week')
       expect(calls[2]).toEqual(['status', '--format', 'json', '--period', 'week'])
@@ -961,6 +961,14 @@ describe('project filter', () => {
       await handlers['codeburn:getSessions']!('week', 'all')
       expect(calls[5]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project=work', '--exclude=scratch'])
     })
+  })
+
+  it('accepts the temporary-folders row for the top bar pick', async () => {
+    const { spawnCli, spawnCliAction, calls } = fakeSpawn()
+    const handlers = createBridgeHandlers(deps({ spawnCli, spawnCliAction, resolveCodeburnPath: () => '/bin/codeburn' }))
+    expect(await handlers['codeburn:setTransientProject']!('@temp')).toEqual({ ok: true, value: undefined })
+    await handlers['codeburn:getSessions']!('week', 'all')
+    expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project==@temp'])
   })
 
   it('accepts only an absolute project path for the top bar pick', async () => {

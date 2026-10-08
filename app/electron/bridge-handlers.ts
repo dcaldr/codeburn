@@ -488,7 +488,8 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
   let transientProject: string | null = null
   const projectArgs = (): string[] => {
     const filter = savedFilter()
-    return filterArgs(transientProject ? scopeFilter([transientProject])(filter) : filter)
+    // "=": the picked row alone, not the folders under it that are rows of their own.
+    return filterArgs(transientProject ? scopeFilter([`=${transientProject}`])(filter) : filter)
   }
   const telemetry = deps.telemetry ?? null
   // Flips true after the first overview fetch succeeds. Until then, every
@@ -803,10 +804,10 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       try { return { ok: true, value: readProjectFilter() } }
       catch (error) { return { ok: false, error: toEnvelopeError(error) } }
     },
-    // An absolute path only: a bare name would be a substring pattern and
-    // could take in every project sharing it.
+    // An absolute path only, or the temporary-folders row: a bare name would be
+    // a substring pattern and could take in every project sharing it.
     'codeburn:setTransientProject': async (projectPath?: unknown) => {
-      if (projectPath !== null && (typeof projectPath !== 'string' || !path.isAbsolute(projectPath) || projectPath.includes('\0'))) {
+      if (projectPath !== null && projectPath !== '@temp' && (typeof projectPath !== 'string' || !path.isAbsolute(projectPath) || projectPath.includes('\0'))) {
         return { ok: false, error: { kind: 'bad-args', message: 'invalid project path' } }
       }
       transientProject = projectPath
