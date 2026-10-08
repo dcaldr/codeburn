@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 
 import { getCodeburnCacheDir } from './cache-dir.js'
 
@@ -144,6 +144,8 @@ export function gitOriginKey(path: string): string | null {
     if ((Object.hasOwn(recorded, path) ? recorded[path] : null) !== key) {
       if (key) recorded[path] = key
       else delete recorded[path]
+      checkoutsByParent = null
+      folderNameMatch.clear()
       // Lookups outside a parse (a filter over carried days) are kept too.
       if (!exitHooked) process.once('exit', saveGitOrigins)
       exitHooked = true
@@ -170,6 +172,47 @@ function nativeProjectPath(projectPath: string | undefined): string | null {
 export function projectOriginKey(projectPath: string | undefined): string | null {
   const path = nativeProjectPath(projectPath)
   return path ? gitOriginKey(path) : null
+}
+
+let checkoutsByParent: Map<string, string[]> | null = null
+const folderNameMatch = new Map<string, string | null>()
+
+/** Fallback for a DELETED folder that never had its origin recorded: when it is
+ *  a sibling of a repository's checkout, named `<checkout>-<suffix>`
+ *  or `<checkout>_<suffix>` in the same parent folder, it joins that
+ *  repository; when several checkout names fit, the longest wins. Null while
+ *  the folder exists (its own git data answers), when it has a real origin,
+ *  and when the longest fitting names belong to two repositories. */
+export function folderNameOriginKey(projectPath: string | undefined): string | null {
+  const path = nativeProjectPath(projectPath)
+  if (!path) return null
+  const memo = folderNameMatch.get(path)
+  if (memo !== undefined) return memo
+  let match: string | null = null
+  if (!existsSync(path) && !gitOriginKey(path)) {
+    if (!checkoutsByParent) {
+      checkoutsByParent = new Map()
+      for (const checkout of Object.keys(recorded ?? {})) {
+        const list = checkoutsByParent.get(dirname(checkout))
+        if (list) list.push(checkout)
+        else checkoutsByParent.set(dirname(checkout), [checkout])
+      }
+    }
+    const name = basename(path)
+    let longest = 0
+    let origins = new Set<string>()
+    for (const checkout of checkoutsByParent.get(dirname(path)) ?? []) {
+      const base = basename(checkout)
+      if (base.length < longest || name.length <= base.length + 1 || !name.startsWith(base) || !'-_'.includes(name[base.length]!)) continue
+      const origin = gitOriginKey(checkout)
+      if (!origin) continue
+      if (base.length > longest) { longest = base.length; origins = new Set() }
+      origins.add(origin)
+    }
+    if (origins.size === 1) match = [...origins][0]!
+  }
+  folderNameMatch.set(path, match)
+  return match
 }
 
 /** The one list row (and filter pattern) for every folder under a temp root
@@ -230,4 +273,6 @@ export function __resetGitOriginCache(): void {
   keyByPath.clear()
   pending.clear()
   recorded = null
+  checkoutsByParent = null
+  folderNameMatch.clear()
 }

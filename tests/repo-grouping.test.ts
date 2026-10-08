@@ -6,13 +6,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { loadDailyCache, projectDayIdentity, type DailyEntry } from '../src/daily-cache.js'
 import { aggregateProjectsIntoDays } from '../src/day-aggregator.js'
-import { __resetGitOriginCache, __setTempRoots, projectOriginKey, saveGitOrigins } from '../src/git-origin.js'
+import { __resetGitOriginCache, __setTempRoots, folderNameOriginKey, projectOriginKey, saveGitOrigins } from '../src/git-origin.js'
 import { filterProjectsByName, makeProjectFilter, setExactProjectPaths } from '../src/parser.js'
 import { spendProjectIdentity } from '../src/spend-flow.js'
 import type { ProjectSummary, SessionSummary } from '../src/types.js'
 import { buildPayloadProjects } from '../src/usage-aggregator.js'
+import { renderOverview } from '../src/overview.js'
 
 let root: string
+// Checkout ids are spend identities: on Windows, lower-cased with forward slashes.
+const id = (path: string) => spendProjectIdentity({ project: '', projectPath: path }).id
 const savedCacheDir = process.env['CODEBURN_CACHE_DIR']
 
 function repo(dir: string, origin: string): string {
@@ -106,7 +109,7 @@ describe('projects grouped by git repository', () => {
     const group = rows[0]!
     expect(group.path).toBe(a1)
     expect(group.sessions).toBe(3)
-    expect(group.checkouts?.map(c => c.id).sort()).toEqual([a1, a2, awt].map(p => spendProjectIdentity({ project: '', projectPath: p }).id).sort())
+    expect(group.checkouts?.map(c => c.id).sort()).toEqual([a1, a2, awt].map(id).sort())
     expect(rows[1]!.checkouts).toBeUndefined()
     expect(rows[2]!.path).toBe(plain)
     // Folding never moves money.
@@ -212,5 +215,72 @@ describe('projects grouped by git repository', () => {
 
     const cache = await loadDailyCache()
     expect(Object.values(cache.days[0]!.projects!)[0]!.originKey).toBe('github.com/getagentseal/codeburn')
+  })
+
+  describe('deleted folders matched by folder name', () => {
+    it('joins a deleted <checkout>-<suffix> or <checkout>_<suffix> sibling to that repository, flagged', () => {
+      const { a1, other } = fixtures()
+      const dash = join(root, 'work', 'codeburn-fix-123')
+      const under = join(root, 'work', 'codeburn_old')
+      const projects = [live(dash, 2), live(under, 1), live(a1, 5), live(other, 4)]
+      for (const p of projects) projectOriginKey(p.projectPath)
+
+      expect(folderNameOriginKey(dash)).toBe('github.com/getagentseal/codeburn')
+      const rows = buildPayloadProjects(projects, null, homedir())
+      expect(rows.map(r => [r.name, r.cost])).toEqual([['codeburn', 8], ['codeburn-app', 4]])
+      const checkouts = rows[0]!.checkouts!
+      expect(checkouts.find(c => c.id === id(a1))!.matchedByFolderName).toBeUndefined()
+      expect(checkouts.filter(c => c.matchedByFolderName).map(c => c.id).sort()).toEqual([dash, under].map(id).sort())
+      expect(filterProjectsByName(projects, [a1]).map(p => p.projectPath).sort()).toEqual([a1, dash, under].sort())
+      expect(filterProjectsByName(projects, [], [a1]).map(p => p.projectPath).sort()).toEqual([dash, under, other].sort())
+
+      const report = renderOverview(projects, { label: 'p', color: false })
+      expect(report).toMatch(/codeburn \*/)
+      expect(report).toContain('* includes deleted folders matched by folder name')
+      expect(renderOverview([live(a1, 5), live(other, 4)], { label: 'p', color: false })).not.toContain('matched by folder name')
+    })
+
+    it('never applies to a folder that still exists', () => {
+      const { a1 } = fixtures()
+      const notes = join(root, 'work', 'codeburn-notes')
+      mkdirSync(notes, { recursive: true })
+      projectOriginKey(a1)
+
+      expect(folderNameOriginKey(notes)).toBeNull()
+      const rows = buildPayloadProjects([live(a1, 5), live(notes, 1)], null, homedir())
+      expect(rows.map(r => [r.name, r.cost])).toEqual([['codeburn', 5], ['codeburn-notes', 1]])
+    })
+
+    it('picks the longest checkout name when several fit', () => {
+      const { a1, other } = fixtures()
+      const gone = join(root, 'work', 'codeburn-app-old')
+      projectOriginKey(a1)
+      projectOriginKey(other)
+
+      expect(folderNameOriginKey(gone)).toBe('github.com/getagentseal/codeburn-app')
+      const rows = buildPayloadProjects([live(a1, 5), live(other, 4), live(gone, 1)], null, homedir())
+      expect(rows.map(r => [r.name, r.cost])).toEqual([['codeburn', 5], ['codeburn-app', 5]])
+      expect(rows[1]!.checkouts!.find(c => c.id === id(gone))!.matchedByFolderName).toBe(true)
+    })
+
+    it('skips a name whose longest fits belong to two repositories', () => {
+      const work = join(root, 'work')
+      writeFileSync(join(root, 'cache', 'git-origins.json'), JSON.stringify({ version: 1, paths: {
+        [join(work, 'shared')]: 'github.com/org/one',
+        [`${join(work, 'shared')}/`]: 'github.com/org/two',
+        [join(work, 'sha')]: 'github.com/org/three',
+      } }))
+      __resetGitOriginCache()
+
+      expect(folderNameOriginKey(join(work, 'shared-copy'))).toBeNull()
+    })
+
+    it('leaves unrelated names alone', () => {
+      const { a1 } = fixtures()
+      projectOriginKey(a1)
+      for (const name of [join(root, 'work', 'codeburnx'), join(root, 'work', 'my-codeburn'), join(root, 'work', 'codeburn-'), join(root, 'elsewhere', 'codeburn-fix')]) {
+        expect(folderNameOriginKey(name)).toBeNull()
+      }
+    })
   })
 })
