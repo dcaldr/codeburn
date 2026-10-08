@@ -331,7 +331,12 @@ import type { DateRange, ProjectSummary } from './types.js'
 // v68: Kimi Code sessions whose state.json carries `cwd` but no `workDir` land
 // on that folder. Only the per-project split moves; cost, tokens and calls are
 // unchanged, so the bump re-derives surviving days.
-export const DAILY_CACHE_VERSION = 68
+// v69: Claude calls go to the project of their own cwd, so a session that
+// moved folders splits across projects per call. Settled days re-derive their
+// project rows; provider call counts and cost are unchanged, so no
+// PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed. Days whose transcripts
+// are gone keep their old single-project attribution.
+export const DAILY_CACHE_VERSION = 69
 const MIN_SUPPORTED_VERSION = 28
 
 /// Providers whose per-day CALL COUNT means something different at
