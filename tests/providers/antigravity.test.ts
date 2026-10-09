@@ -21,6 +21,9 @@ import {
   normalizeAntigravityToolCall,
   antigravityCacheFileName,
   flushAntigravityCache,
+  dropPlaceholderModelId,
+  normalizePricingModel,
+  buildCallsFromGeneratorMetadata,
 } from '../../src/providers/antigravity.js'
 import type { ParsedProviderCall } from '../../src/providers/types.js'
 import { classifyTurn } from '../../src/classifier.js'
@@ -756,6 +759,65 @@ describe('antigravity provider helpers', () => {
       expect(current.cascades['fixture-pb'].calls).toHaveLength(1)
       expect(shouldReparseAntigravitySource(pbPath, 1)).toBe(true)
     })
+  })
+
+  it('safely drops placeholder model IDs and falls back to unknown on empty or undefined inputs', () => {
+    expect(dropPlaceholderModelId(undefined)).toBe('unknown')
+    expect(dropPlaceholderModelId('')).toBe('unknown')
+    expect(dropPlaceholderModelId('MODEL_PLACEHOLDER_M16')).toBe('unknown')
+    expect(dropPlaceholderModelId('MODEL_PLACEHOLDER_UNKNOWN')).toBe('unknown')
+    expect(dropPlaceholderModelId('gemini-3.1-pro-high')).toBe('gemini-3.1-pro-high')
+  })
+
+  it('normalizes pricing models defensively, mapping truncated suffixes and pricing aliases', () => {
+    expect(normalizePricingModel(undefined)).toBe('unknown')
+    expect(normalizePricingModel('')).toBe('unknown')
+    expect(normalizePricingModel('gemini-pro')).toBe('gemini-3.1-pro')
+    expect(normalizePricingModel('gemini-pro-agent')).toBe('gemini-3.1-pro')
+    expect(normalizePricingModel('gemini-3-flash')).toBe('gemini-3-flash-preview')
+    expect(normalizePricingModel('gemini-3-flash-a')).toBe('gemini-3-flash-preview')
+    expect(normalizePricingModel('gemini-3-flash-d')).toBe('gemini-3-flash-preview')
+    expect(normalizePricingModel('gemini-3.8-flash-n')).toBe('gemini-3.8-flash')
+    expect(normalizePricingModel('gemini-3.8-flash-high')).toBe('gemini-3.8-flash')
+    expect(normalizePricingModel('gemini-3.8-flash-low')).toBe('gemini-3.8-flash')
+  })
+
+  it('builds calls from generator metadata with fallback to chatModel.model when usage.model is omitted', () => {
+    const metadata = [
+      {
+        chatModel: {
+          model: 'MODEL_PLACEHOLDER_M8',
+          chatStartMetadata: { createdAt: '2025-12-01T10:00:00.000Z' },
+          usage: {
+            // usage.model is omitted/undefined in legacy Language Server RPC
+            inputTokens: '150',
+            outputTokens: '45',
+            responseOutputTokens: '45',
+          },
+        },
+      },
+      {
+        chatModel: {
+          // both usage.model and chatModel.model are omitted
+          chatStartMetadata: { createdAt: '2025-12-01T10:05:00.000Z' },
+          usage: {
+            inputTokens: '100',
+            outputTokens: '20',
+            responseOutputTokens: '20',
+          },
+        },
+      },
+    ]
+
+    const modelMap = {
+      MODEL_PLACEHOLDER_M8: 'gemini-pro',
+    }
+
+    const calls = buildCallsFromGeneratorMetadata('test-cascade', metadata, modelMap)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.model).toBe('gemini-pro')
+    expect(calls[0]!.costUSD).toBeGreaterThan(0)
+    expect(calls[1]!.model).toBe('unknown')
   })
 
   async function withTempAntigravityHome(prefix: string, fn: (tempHome: string) => Promise<void>): Promise<void> {
