@@ -38,11 +38,25 @@ export type AutoUpdateChecker = UpdateChecker & {
   install(): void
 }
 
+/** A failed download is a verify failure when the checksum or Squirrel's code signature check refused it. */
+export function downloadFailOutcome(err: unknown): 'download_fail' | 'verify_fail' {
+  const code = (err as { code?: unknown } | null)?.code
+  const message = err instanceof Error ? err.message : String(err)
+  return code === 'ERR_CHECKSUM_MISMATCH' || /checksum|sha512|signature|did not pass validation/i.test(message)
+    ? 'verify_fail'
+    : 'download_fail'
+}
+
 export function createAutoUpdateChecker(opts: {
   updater: Updater
   currentVersion: string
   onChange: (status: UpdateStatus) => void
   now?: () => number
+  /** A download that failed, as an outcome enum. */
+  onDownloadFail?: (outcome: 'download_fail' | 'verify_fail', from: string, to: string) => void
+  /** Called when the update is downloaded and again just before quitting into it: from then
+   *  on it installs, at the latest on the next quit. */
+  onInstall?: (from: string, to: string) => void
 }): AutoUpdateChecker {
   const { updater, currentVersion, onChange } = opts
   const now = opts.now ?? (() => Date.now())
@@ -55,7 +69,9 @@ export function createAutoUpdateChecker(opts: {
   const set = (next: UpdateStatus) => { status = next; onChange(status) }
 
   updater.on('update-downloaded', () => {
-    if (status.install === 'downloading') set({ ...status, install: 'ready' })
+    if (status.install !== 'downloading') return
+    opts.onInstall?.(currentVersion, status.latestVersion ?? '')
+    set({ ...status, install: 'ready' })
   })
 
   const check = (): Promise<UpdateStatus> => {
@@ -94,7 +110,8 @@ export function createAutoUpdateChecker(opts: {
       set({ ...status, install: 'downloading' })
       try {
         await updater.downloadUpdate()
-      } catch {
+      } catch (err) {
+        opts.onDownloadFail?.(downloadFailOutcome(err), currentVersion, status.latestVersion ?? '')
         // Fall back to the manual download link rather than a button that keeps failing.
         const { install: _dropped, ...rest } = status
         set(rest)
@@ -102,7 +119,9 @@ export function createAutoUpdateChecker(opts: {
       return status
     },
     install() {
-      if (status.install === 'ready') updater.quitAndInstall()
+      if (status.install !== 'ready') return
+      opts.onInstall?.(currentVersion, status.latestVersion ?? '')
+      updater.quitAndInstall()
     },
   }
 }

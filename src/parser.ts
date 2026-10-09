@@ -14,6 +14,7 @@ import { antigravityCascadeIdFromPath, flushAntigravityCache, preloadAntigravity
 import { getClaudeConfigDirs, getDesktopSessionsDirs } from './providers/claude.js'
 import { kimicodeLineageForSource } from './providers/kimicode.js'
 import { isSqliteBusyError } from './sqlite.js'
+import { clearProviderIssue, recordProviderIssue } from './provider-issues.js'
 import { getCodeburnCacheDir } from './cache-dir.js'
 import {
   isHermesLedgerPublicationError,
@@ -3402,6 +3403,7 @@ const parseFailureCounts = new Map<string, number>()
 const PARSE_FAILURE_WARN_CAP = 5
 
 function warnProviderParseFailure(providerName: string, sourcePath: string, err: unknown): void {
+  recordProviderIssue(providerName, 'parse', err)
   const n = (parseFailureCounts.get(providerName) ?? 0) + 1
   parseFailureCounts.set(providerName, n)
   if (n > PARSE_FAILURE_WARN_CAP) return
@@ -6578,9 +6580,11 @@ async function runParseInner(
         claudeProjects.push(...deduplicateClaudeDesktopLedger(ledgerProjects, claudeProjects))
       }
       if (claudeSources.length > 0) emitScanProgress({ kind: 'provider', provider: 'claude', state: 'done', files: claudeSources.length })
+      clearProviderIssue('claude', 'parse', 'eacces')
     } catch (err) {
       if (!isPermissionError(err)) throw err
       permissionSkippedProviders.add('claude')
+      recordProviderIssue('claude', 'parse', err)
       process.stderr.write(`codeburn: skipped claude data (permission denied; grant Full Disk Access to include it)\n`)
       emitScanProgress({ kind: 'provider', provider: 'claude', state: 'skipped' })
     }
@@ -6593,12 +6597,14 @@ async function runParseInner(
     try {
       const projects = await parseProviderSources(providerName, sources, seenKeys, diskCache, dateRange, saveProgress, readOnly)
       emitScanProgress({ kind: 'provider', provider: providerName, state: 'done', files: sources.length })
+      clearProviderIssue(providerName, 'parse', 'eacces')
       otherProjects.push(...projects)
     } catch (err) {
       // A permission-locked provider skips-and-continues; any other error is a
       // real bug and still aborts (per-file/DB-lock cases are handled deeper).
       if (!isPermissionError(err)) throw err
       permissionSkippedProviders.add(providerName)
+      recordProviderIssue(providerName, 'parse', err)
       process.stderr.write(`codeburn: skipped ${providerName} data (permission denied; grant Full Disk Access to include it)\n`)
       emitScanProgress({ kind: 'provider', provider: providerName, state: 'skipped' })
     }
