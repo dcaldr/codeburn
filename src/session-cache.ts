@@ -435,7 +435,8 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // re-parse to keep the recorded session cost.
   crush: 'reported-cost-v1',
   // import-guess-est-v1: synced Auto rows with no dollar amount are estimated.
-  cursor: 'composer-anchored-crediting-v1-est-cost-import-guess-est-v1',
+  // full-lookback-v1: a cached parse could be cut at a narrow request's start.
+  cursor: 'composer-anchored-crediting-v1-est-cost-import-guess-est-v1-full-lookback-v1',
   // full-turn-accounting: every assistant message counts as a turn
   // (previously only the first after each user message survived), tool_use
   // inputs join the output text, and input tokens use the full user text
@@ -446,7 +447,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // ~/.cursor/chats/*/*/store.db.
   // prompt-time-v1: transcript turns take their prompt's <timestamp> tag, not
   // the session's last write.
-  'cursor-agent': 'workspaceless-transcript-v1-full-turn-accounting-v2-store-db-v1-est-cost-prompt-time-v1',
+  // ide-composer-skip-v1: transcripts of Cursor IDE chats are not read; the
+  // cursor provider counts those chats.
+  'cursor-agent': 'workspaceless-transcript-v1-full-turn-accounting-v2-store-db-v1-est-cost-prompt-time-v1-ide-composer-skip-v1',
   // source-provenance-v1 (#944): CLI sessions were misread as VS Code
   // transcripts (both carry producer 'copilot-agent'), skipping the shutdown
   // input/cache rollup; this bump re-parses them so the missing tokens land.
@@ -487,7 +490,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // store-row-output-v1: every session-store row carries its own
   // output_tokens; serve time zeroes it where a per-turn call owns the output.
   // Keys are unchanged, so the re-parse replaces cached output-0 rows in place.
-  copilot: 'cli-shutdown-cost-v1-skills-source-provenance-v1-session-store-v3-chatsession-otel-skills-v1-otel-trace-metadata-once-v1-transcript-unknown-usage-v1-otel-workspace-project-v1-journal-request-input-v1-tokenless-turns-v1-store-row-output-v1',
+  // jetbrains-opus-4-7-v1: JetBrains claude-opus-4.7 turns priced as the
+  // anthropic-auto fallback; cached entries must re-parse once.
+  copilot: 'cli-shutdown-cost-v1-skills-source-provenance-v1-session-store-v3-chatsession-otel-skills-v1-otel-trace-metadata-once-v1-transcript-unknown-usage-v1-otel-workspace-project-v1-journal-request-input-v1-tokenless-turns-v1-store-row-output-v1-jetbrains-opus-4-7-v1',
   // authoritative-usage-v4: persist one Grok session call from top-level
   // authoritative totals, use modelUsage only for priced attribution, clamp
   // reasoning per record, and label mixed sessions estimated.
@@ -593,7 +598,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // that omits it.
   // cwd-project-v1: sessions whose state.json has `cwd` but no `workDir` land
   // on that folder instead of a path decoded from the wd_ directory name.
-  kimicode: 'wire-usage-v1-est-cost-session-lineage-capture-v1-cwd-project-v1',
+  // tool-sequence-v1: calls carry each tool call's path and shell command, so
+  // optimize sees commits/PRs and retries per file. Costs are unchanged.
+  kimicode: 'wire-usage-v1-est-cost-session-lineage-capture-v1-cwd-project-v1-tool-sequence-v1',
   // archived-subtree-v1: KiloCode shares the SQLite parser and the same schema.
   // billing-routes-v2: its warm cache must move with both shared route fields.
   'kilo-code': 'worktree-project-grouping-v1-session-model-v1-archived-subtree-v1-billing-routes-v2-v2-legacy-union-v1-unknown-usage-v1-vertex-fallback-cost-v1',

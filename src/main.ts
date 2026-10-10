@@ -22,7 +22,7 @@ import { CATEGORY_LABELS, type DateRange, type ProjectSummary, type TaskCategory
 import type { AppliedFix } from './act/types.js'
 import { aggregateModelEfficiency } from './model-efficiency.js'
 import { buildPayloadProjects, buildPeriodData, buildMenubarPayloadForRange, buildDurablePeriod, getDailyCacheConfigHash, SERVE_HYDRATION_ENV, type DurablePeriod } from './usage-aggregator.js'
-import { aggregateProjectsIntoDays } from './day-aggregator.js'
+import { aggregateProjectsIntoDays, dateKeyInTz } from './day-aggregator.js'
 import { buildPeriodDiffReport, defaultSevenDayRanges, diffSessions, dayKeyToRange, historyBasis, localRangeInfo } from './period-diff.js'
 import { loadStatusSnapshot, saveStatusSnapshot } from './session-cache.js'
 import { renderDashboard } from './dashboard.js'
@@ -526,14 +526,24 @@ async function runJsonReport(period: Period, provider: string, project: string[]
 // which promise to stay offline. The keepalive beats through the download for
 // the app watchdogs; it is reference-counted, so the stop never silences a
 // beat serve armed around the whole request.
-async function syncCursor(provider: string): Promise<void> {
-  const { maybeSyncCursor } = await import('./cursor-sync.js')
-  startProgressKeepalive()
-  try {
-    await maybeSyncCursor({ provider })
-  } finally {
-    stopProgressKeepalive()
-  }
+//
+// A JSON or menubar answer never waits on cursor.com: `background` leaves the
+// download running beside the command, and its import shows from the next run
+// on. Dashboards still wait, since they render once and stay open. One sync at
+// a time keeps a serve burst to one download.
+let cursorSync: Promise<void> | null = null
+async function syncCursor(provider: string, background = false): Promise<void> {
+  cursorSync ??= (async () => {
+    const { maybeSyncCursor } = await import('./cursor-sync.js')
+    startProgressKeepalive()
+    try {
+      await maybeSyncCursor({ provider, deferImport: background })
+    } finally {
+      stopProgressKeepalive()
+      cursorSync = null
+    }
+  })()
+  if (!background) await cursorSync
 }
 
 const program = new Command()
@@ -891,7 +901,7 @@ program
     }
 
     const period = toPeriod(opts.period)
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await loadPricing()
       if (daySelection || customRange) {
@@ -1066,7 +1076,7 @@ program
   .option('--no-color', 'Disable ANSI colors')
   .action(async (opts) => {
     assertProvider(opts.provider, 'overview')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, true)
     await loadPricing()
     let customRange: DateRange | null = null
     try {
@@ -1233,7 +1243,7 @@ program
     const pf = opts.provider
     const fp = (p: ProjectSummary[]) => filterProjectsByName(p, opts.project, opts.exclude)
     if (opts.format === 'menubar-json') {
-      await syncCursor(pf)
+      await syncCursor(pf, true)
       const daysSelection = parseDaysFlag(opts.days)
       const customRange = daysSelection ? null : parseDateRangeFlags(opts.from, opts.to)
       const daySelection = parseDayFlag(opts.day)
@@ -1477,7 +1487,7 @@ program
   .action(async (opts) => {
     assertFormat(opts.format, ['tui', 'json'], 'today')
     assertProvider(opts.provider, 'today')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await runJsonReport('today', opts.provider, opts.project, opts.exclude)
       return
@@ -1496,7 +1506,7 @@ program
   .action(async (opts) => {
     assertFormat(opts.format, ['tui', 'json'], 'month')
     assertProvider(opts.provider, 'month')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await runJsonReport('month', opts.provider, opts.project, opts.exclude)
       return
@@ -1657,7 +1667,14 @@ program
     await saveConfig(config)
 
     await loadCurrency()
-    const { rate, symbol } = getCurrency()
+    const { code: activeCode, rate, symbol } = getCurrency()
+
+    if (activeCode !== upperCode) {
+      console.log(`\n  Currency set to ${upperCode}, but no exchange rate is available yet (offline?).`)
+      console.log(`  Showing USD until a rate can be fetched.`)
+      console.log(`  Config saved to ${getConfigFilePath()}\n`)
+      return
+    }
 
     console.log(`\n  Currency set to ${upperCode}.`)
     console.log(`  Symbol: ${symbol}`)
@@ -2778,6 +2795,7 @@ program
           aggregateProjectsIntoDays,
           getDailyCacheConfigHash(),
           isSessionHydrationComplete,
+          (projects, tz) => aggregateProjectsIntoDays(projects, (iso) => dateKeyInTz(iso, tz)),
         )
         history = historyBasis(
           cache,
@@ -3354,5 +3372,12 @@ if (process.argv[2] === 'serve') {
   startProgressKeepalive()
   const program = buildProgram()
   await registerLoadedPluginCommands(program)
+  // A background Cursor sync applies its download once the command is done,
+  // never under the command's own parse.
+  let commandDone = () => {}
+  const done = new Promise<void>(resolve => { commandDone = resolve })
+  program.hook('postAction', () => commandDone())
+  const { setCursorImportRunner } = await import('./cursor-sync.js')
+  setCursorImportRunner(apply => done.then(apply))
   program.parse()
 }
