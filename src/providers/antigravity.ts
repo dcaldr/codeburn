@@ -820,7 +820,6 @@ function antigravitySqliteMetadataAttributes(chatFields: readonly ProtoField[]):
 // 2026 (the same ids the RPC path derives). A later app build can repoint a
 // placeholder, so calls resolved here are flagged as estimated.
 const PLACEHOLDER_MODELS: Record<string, string> = {
-  MODEL_PLACEHOLDER_M8: 'gemini-pro',
   MODEL_PLACEHOLDER_M16: 'gemini-3.1-pro-high',
   MODEL_PLACEHOLDER_M37: 'gemini-3.1-pro-high',
   MODEL_PLACEHOLDER_M36: 'gemini-3.1-pro-low',
