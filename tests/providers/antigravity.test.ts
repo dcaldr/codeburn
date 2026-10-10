@@ -680,6 +680,44 @@ describe('antigravity provider helpers', () => {
     })
   })
 
+  it('resolves the Gemini 3.8 Flash placeholders from standalone app gen_metadata', async () => {
+    if (!isSqliteAvailable()) return
+
+    await withTempAntigravityHome('codeburn-antigravity-38-flash-', async (tempHome) => {
+      const fixture = JSON.parse(await readFile(
+        new URL('../fixtures/antigravity-standalone/gen-metadata.json', import.meta.url),
+        'utf-8',
+      )) as CurrentCliFixture
+      const conversationsDir = join(tempHome, '.gemini', 'antigravity', 'conversations')
+      await mkdir(conversationsDir, { recursive: true })
+      // Swap row 0's model_enum M16 for a three-digit enum; the chatModel and pair lengths grow by one byte.
+      const withEnum = (enumNumber: string) => fixture.rows[0]!.hex
+        .replace('0a8103', '0a8203')
+        .replace(
+          'a201230a0a6d6f64656c5f656e756d12154d4f44454c5f504c414345484f4c4445525f4d3136',
+          'a201240a0a6d6f64656c5f656e756d12164d4f44454c5f504c414345484f4c4445525f4d' + Buffer.from(enumNumber).toString('hex'),
+        )
+
+      for (const [enumNumber, model] of [['318', 'gemini-3.8-flash-high'], ['319', 'gemini-3.8-flash-medium'], ['320', 'gemini-3.8-flash-low']]) {
+        const dbPath = join(conversationsDir, `fixture-m${enumNumber}.db`)
+        createCurrentAntigravityCliDb(dbPath, { conversationId: `fixture-m${enumNumber}`, rows: [{ idx: 0, hex: withEnum(enumNumber!) }] })
+
+        const calls = await collectAntigravityCalls({ path: dbPath, project: 'antigravity', provider: 'antigravity' })
+        expect(calls).toHaveLength(1)
+        const call = calls[0]!
+        expect(call.model).toBe(model)
+        expect(call.costIsEstimated).toBe(true)
+        expect(createAntigravityProvider().modelDisplayName(call.model)).toBe('Gemini 3.8 Flash')
+        // gemini-3.8-flash: $0.75/M input, $3.75/M output (thinking included), $0.075/M cache read.
+        expect(call.inputTokens).toBeGreaterThan(0)
+        expect(call.costUSD).toBeCloseTo(
+          call.inputTokens * 0.75e-6 + (call.outputTokens + call.reasoningTokens) * 3.75e-6 + call.cacheReadInputTokens * 0.075e-6,
+          12,
+        )
+      }
+    })
+  })
+
   it('dates standalone rows without created_at from their first step', async () => {
     if (!isSqliteAvailable()) return
 
