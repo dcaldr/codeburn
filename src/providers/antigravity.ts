@@ -685,10 +685,8 @@ async function getModelMap(server: ServerInfo): Promise<ModelMap> {
 // Strip Antigravity-specific suffixes so the pricing DB can match
 const PRICING_ALIASES: Record<string, string> = {
   'gemini-pro': 'gemini-3.1-pro',
-  'gemini-3-flash': 'gemini-3-flash-preview',
   'gemini-3-flash-a': 'gemini-3-flash-preview',
   'gemini-3-flash-d': 'gemini-3-flash-preview',
-  'gemini-3.8-flash-n': 'gemini-3.8-flash',
 }
 
 export function normalizePricingModel(model: string | undefined): string {
