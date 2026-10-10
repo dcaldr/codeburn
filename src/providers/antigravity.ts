@@ -50,7 +50,7 @@ function conversationRoots(): readonly AntigravityConversationRoot[] {
     },
   ]
 }
-const CACHE_VERSION = 8
+const CACHE_VERSION = 9
 export const ANTIGRAVITY_CACHE_VERSION = CACHE_VERSION
 export const ANTIGRAVITY_LEGACY_CACHE_FILE = 'antigravity-results.json'
 export function antigravityCacheFileName(version = CACHE_VERSION): string {
