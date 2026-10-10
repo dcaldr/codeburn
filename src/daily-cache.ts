@@ -831,13 +831,11 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   // A date is a local-midnight bucket, so two files written under different
   // timezones hold different hours under the same date and any per-slice union
   // of them counts the hours between the two midnights twice. Adopt one
-  // timezone only: the machine's when some file has it, else the top file's,
-  // and tag the result with the zone it was bucketed in. Files from before
-  // tzKey existed cannot be told apart and stay in.
-  const machineTz = currentTzKey()
-  const adoptTz = candidates.some(c => c.parsed.tzKey === machineTz)
-    ? machineTz
-    : candidates.find(c => c.parsed.tzKey !== undefined)?.parsed.tzKey ?? machineTz
+  // timezone only, the top file's, and tag the result with it so hydration
+  // re-buckets it if the machine's differs. Preferring the machine's dropped
+  // the richest file whenever an older one matched. Files from before tzKey
+  // existed cannot be told apart and stay in.
+  const adoptTz = candidates.find(c => c.parsed.tzKey !== undefined)?.parsed.tzKey ?? currentTzKey()
   candidates = candidates.filter(c => c.parsed.tzKey === undefined || c.parsed.tzKey === adoptTz)
 
   let base: DailyCache
@@ -846,7 +844,7 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
     base = migratedFrom(candidates[0]!.parsed as Parameters<typeof migratedFrom>[0])
     rest = candidates.slice(1)
   } else {
-    base = emptyCache()
+    base = emptyCache(candidates[0]!.parsed.savingsConfigHash)
   }
   let days = base.days
   for (const { parsed } of rest) {
@@ -1003,8 +1001,11 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
   // it pollutes every object in the process.
   const placeholder = Object.hasOwn(day.providers, provider) ? day.providers[provider] : undefined
   const placeholderSessions = placeholder?.sessions ?? 0
-  const merged = structuredClone(slice)
-  if (residual) {
+  // A residual over a fresh slice that carries data is content no surviving
+  // source explains, so it adds to that slice instead of replacing it.
+  const summed = residual && placeholder !== undefined && hasSliceData(placeholder)
+  const merged = summed ? addSliceInto(structuredClone(placeholder), slice) : structuredClone(slice)
+  if (residual && !summed) {
     // The subtraction removed the placeholder's sessions from this residual, so
     // every remaining session is distinct from the placeholder's - add, don't
     // max (max would clamp 1 + 1 to 1 and lose the source-gone session).
@@ -1060,6 +1061,7 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
     acc.sessions += residual ? num(p.sessions) : Math.max(0, num(p.sessions) - placeholderProjectSessions)
     setOwn(dayProjects, name, acc)
   }
+  if (summed) return
   // Placeholder-only projects (session counted fresh, calls landed elsewhere)
   // survive on the merged slice rather than being dropped by the clone above.
   const mergedProjects = merged.projects
@@ -1079,6 +1081,33 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
   } else if (placeholder?.projects) {
     merged.projects = structuredClone(placeholder.projects)
   }
+}
+
+function addSliceInto(target: ProviderDaySlice, add: ProviderDaySlice): ProviderDaySlice {
+  for (const key of ['calls', 'cost', 'savingsUSD', 'sessions', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'editTurns', 'oneShotTurns'] as const) {
+    target[key] = (target[key] ?? 0) + (add[key] ?? 0)
+  }
+  for (const [name, m] of Object.entries(add.models ?? {})) {
+    const models = (target.models ??= {})
+    const acc = Object.hasOwn(models, name) ? models[name]! : emptyModelStats()
+    for (const key of REMAINDER_KEYS) acc[key] += m[key] ?? 0
+    setOwn(models, name, acc)
+  }
+  for (const [cat, c] of Object.entries(add.categories ?? {})) {
+    const categories = (target.categories ??= {})
+    const acc = Object.hasOwn(categories, cat) ? categories[cat]! : { turns: 0, cost: 0, savingsUSD: 0, editTurns: 0, oneShotTurns: 0 }
+    for (const key of ['turns', 'cost', 'savingsUSD', 'editTurns', 'oneShotTurns'] as const) acc[key] += c[key] ?? 0
+    setOwn(categories, cat, acc)
+  }
+  for (const [name, p] of Object.entries(add.projects ?? {})) {
+    const projects = (target.projects ??= {})
+    const acc = Object.hasOwn(projects, name) ? projects[name]! : { cost: 0, calls: 0, savingsUSD: 0, sessions: 0 }
+    for (const key of ['cost', 'calls', 'savingsUSD', 'sessions'] as const) acc[key] += num(p[key])
+    if (!acc.path && p.path) acc.path = p.path
+    if (!acc.originKey && p.originKey) acc.originKey = p.originKey
+    setOwn(projects, name, acc)
+  }
+  return target
 }
 
 /// Assign via defineProperty so filesystem-derived keys like "__proto__" become
@@ -1116,9 +1145,10 @@ function subtractSlice(base: ProviderDaySlice, sub: ProviderDaySlice): ProviderD
   const cacheWriteTokens = Math.max(0, (base.cacheWriteTokens ?? 0) - (sub.cacheWriteTokens ?? 0))
   const editTurns = Math.max(0, (base.editTurns ?? 0) - (sub.editTurns ?? 0))
   const oneShotTurns = Math.max(0, (base.oneShotTurns ?? 0) - (sub.oneShotTurns ?? 0))
-  const models = subtractModels(base.models, sub.models)
-  const categories = subtractCategories(base.categories, sub.categories)
-  const projects = subtractProjects(base.projects, sub.projects)
+  const totals = { calls, cost, savingsUSD, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, editTurns, oneShotTurns }
+  const models = capToTotals(subtractModels(base.models, sub.models), totals, REMAINDER_KEYS)
+  const categories = capToTotals(subtractCategories(base.categories, sub.categories), totals, ['cost', 'savingsUSD', 'editTurns', 'oneShotTurns'])
+  const projects = capToTotals(subtractProjects(base.projects, sub.projects), totals, ['cost', 'calls', 'savingsUSD'])
   const out: ProviderDaySlice = {
     calls, cost, savingsUSD,
     ...(sessions > 0 ? { sessions } : {}),
@@ -1133,6 +1163,35 @@ function subtractSlice(base: ProviderDaySlice, sub: ProviderDaySlice): ProviderD
     ...(projects ? { projects } : {}),
   }
   return hasSliceData(out) || (out.sessions ?? 0) > 0 ? out : null
+}
+
+/// Entries are subtracted key by key, so content the fresh parse files under a
+/// key the base lacks (a pre-v67 label-only project, a project now split per
+/// worktree, a renamed model) leaves the base's entry whole and the breakdown
+/// outgrows the residual. Scale each field back to the residual's own total,
+/// keeping whole counts whole; the old keys are the only identity that content has.
+function capToTotals<T extends object>(entries: Record<string, T> | undefined, totals: Record<string, number>, keys: readonly string[]): Record<string, T> | undefined {
+  if (!entries) return undefined
+  // Untouched entries are still the base's own objects.
+  const rows = Object.entries(entries).map(([name, r]) => {
+    const copy = { ...r }
+    setOwn(entries, name, copy)
+    return copy as unknown as Record<string, number>
+  })
+  for (const key of keys) {
+    const total = totals[key] ?? 0
+    const sum = rows.reduce((s, r) => s + num(r[key]), 0)
+    if (sum <= total) continue
+    for (const r of rows) r[key] = num(r[key]) * total / sum
+    if (key === 'cost' || key === 'savingsUSD') continue
+    let left = total
+    for (const r of rows) left -= (r[key] = Math.floor(r[key]!))
+    rows.reduce((a, b) => (b[key]! > a[key]! ? b : a))[key]! += left
+  }
+  for (const [name, r] of Object.entries(entries)) {
+    if (Object.values(r).every(v => typeof v !== 'number' || v === 0)) delete entries[name]
+  }
+  return Object.keys(entries).length > 0 ? entries : undefined
 }
 
 function subtractModelStats(base: ModelDayStats, sub: ModelDayStats): ModelDayStats | null {
@@ -1744,10 +1803,14 @@ export async function ensureCacheHydrated(
       // from each carried baseline slice the content the fresh parse still
       // attributes to that (date, provider) under the OLD bucketing: the turns
       // that re-bucketed across local midnight. That is the issue #770
-      // double-count; re-pricing drift (a savings-hash change) must never be
-      // subtracted, so a hash change in the same re-derive skips this entirely.
+      // double-count. Re-pricing drift (a savings-hash change) must never be
+      // subtracted, so with a hash change in the same re-derive every baseline
+      // slice a surviving source touches under the old bucketing is dropped
+      // whole and the fresh parse wins there: a tz change must never inflate,
+      // even if that loses the source-gone part of a partly surviving slice.
       let tzSubtraction: ReadonlyMap<string, ReadonlyMap<string, ProviderDaySlice>> | undefined
-      if (parseWasComplete && tzChanged && c.savingsConfigHash === savingsConfigHash && aggregateDaysInTz && c.tzKey !== undefined) {
+      let carriedBaseline = baseline
+      if (parseWasComplete && tzChanged && aggregateDaysInTz && c.tzKey !== undefined) {
         // The subtraction re-parses THROUGH NOW (fix round 1): a call bucketed
         // to OLD-tz yesterday that re-buckets to NEW-tz TODAY sits past the
         // history parse's yesterdayEnd, so `freshUnderOldTz` built from `projects`
@@ -1757,11 +1820,25 @@ export async function ensureCacheHydrated(
         // days written to the cache stay exactly the history days and today is
         // still owned by the caller's live parse.
         const wideProjects = await parseSessions({ start: backfillStart, end: now })
-        tzSubtraction = buildTzSubtraction(aggregateDaysInTz(wideProjects, c.tzKey))
+        const freshUnderOldTz = buildTzSubtraction(aggregateDaysInTz(wideProjects, c.tzKey))
+        if (c.savingsConfigHash === savingsConfigHash) {
+          tzSubtraction = freshUnderOldTz
+        } else {
+          carriedBaseline = structuredClone(baseline)
+          for (const day of carriedBaseline) {
+            for (const [provider, slice] of Object.entries(day.providers)) {
+              const explained = freshUnderOldTz.get(day.date)?.get(provider)
+              if (explained && hasSliceData(explained)) subtractSliceFromDay(day, provider, slice)
+            }
+          }
+          carriedBaseline = carriedBaseline.filter(hasPositiveDayContent)
+        }
       }
       const pendingRederive = c.pendingRederive?.length ? new Set(c.pendingRederive) : undefined
+      // Without the subtraction an old-zone slice is never a partial survivor
+      // of the fresh one, so the guard would swap a shifted day back in.
       const merged = parseWasComplete
-        ? mergeDayEntries(freshDays, baseline, true, tzSubtraction, true, pendingRederive)
+        ? mergeDayEntries(freshDays, carriedBaseline, true, tzSubtraction, !tzChanged || tzSubtraction !== undefined, pendingRederive)
         : mergeDayEntries(baseline, freshDays, false)
       // Only the complete re-derive re-parses the whole window, so freshDays is
       // the authoritative record set and every non-carried merged day should be
