@@ -65,7 +65,6 @@ function turnFromCall(call: ParsedProviderCall): ParsedTurn {
   return { userMessage: '', assistantCalls: [apiCall], timestamp: call.timestamp, sessionId: call.sessionId }
 }
 
-
 type CurrentCliFixture = {
   conversationId: string
   rows: Array<{ idx: number; hex: string }>
